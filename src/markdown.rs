@@ -1,44 +1,75 @@
-//! Renders GitHub-flavored markdown as Pango markup for display in a `GtkLabel`.
+//! Parses GitHub-flavored markdown into blocks whose text is Pango markup, ready to be laid
+//! out as GTK widgets (see `ui::markdown_view`).
 
 use gtk::glib::markup_escape_text;
 use pulldown_cmark::{Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 const CODE_SPAN: &str = r##"<span font_family="monospace" background="#808080" bgalpha="20%">"##;
 const MUTED_SPAN: &str = r##"<span foreground="#808080">"##;
-const INDENT: &str = "    ";
 
-pub fn to_pango(markdown: &str) -> String {
+#[derive(Debug)]
+pub enum Block {
+    /// Inline markup.
+    Paragraph(String),
+    /// Level 1–6 and inline markup.
+    Heading(u8, String),
+    /// Escaped code text; `lang` comes from the fence info string.
+    Code { lang: Option<String>, markup: String },
+    Quote { kind: Option<&'static str>, blocks: Vec<Block> },
+    /// `start` is the first number of an ordered list, `None` for bullets.
+    List { start: Option<u64>, items: Vec<ListItem> },
+    /// Monospace markup with columns already aligned.
+    Table(String),
+    Rule,
+}
+
+#[derive(Debug, Default)]
+pub struct ListItem {
+    /// `Some(checked)` for task list items.
+    pub task: Option<bool>,
+    pub blocks: Vec<Block>,
+}
+
+pub fn parse(markdown: &str) -> Vec<Block> {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_GFM;
-    let mut renderer = Renderer::default();
+    let mut builder = Builder {
+        stack: vec![Container::Root(Vec::new())],
+        ..Builder::default()
+    };
     for event in Parser::new_ext(markdown, options) {
-        renderer.event(event);
+        builder.event(event);
     }
-    renderer.flush_text();
-    renderer.out
+    builder.flush_text();
+    builder.finish_inline();
+    match builder.stack.into_iter().next() {
+        Some(Container::Root(blocks)) => blocks,
+        _ => Vec::new(),
+    }
 }
 
 fn escape(text: &str) -> String {
     markup_escape_text(text).to_string()
 }
 
-#[derive(Default)]
-struct Renderer {
-    out: String,
-    /// One entry per open list: the next number for ordered lists, `None` for bullets.
-    lists: Vec<Option<u64>>,
-    quote_depth: usize,
-    /// A bullet was just written, so the item's first block continues on the same line.
-    item_fresh: bool,
-    bullet_at: Option<usize>,
-    link_depth: usize,
-    /// Adjacent text events are merged so bare URLs can be linkified in one piece.
-    pending_text: String,
-    code_block: Option<String>,
-    image: Option<Image>,
-    table: Option<Table>,
+enum Container {
+    Root(Vec<Block>),
+    Quote { kind: Option<&'static str>, blocks: Vec<Block> },
+    List { start: Option<u64>, items: Vec<ListItem> },
+    Item(ListItem),
+}
+
+enum InlineKind {
+    Paragraph,
+    Heading(u8),
+}
+
+/// A paragraph or heading whose markup is still being collected.
+struct Inline {
+    kind: InlineKind,
+    markup: String,
 }
 
 struct Image {
@@ -61,10 +92,22 @@ struct Cell {
     width: usize,
 }
 
-impl Renderer {
+#[derive(Default)]
+struct Builder {
+    stack: Vec<Container>,
+    inline: Option<Inline>,
+    link_depth: usize,
+    /// Adjacent text events are merged so bare URLs can be linkified in one piece.
+    pending_text: String,
+    code_block: Option<(Option<String>, String)>,
+    image: Option<Image>,
+    table: Option<Table>,
+}
+
+impl Builder {
     fn event(&mut self, event: Event<'_>) {
         if let Event::Text(text) = &event {
-            if let Some(code) = &mut self.code_block {
+            if let Some((_, code)) = &mut self.code_block {
                 code.push_str(text);
             } else if let Some(image) = &mut self.image {
                 image.alt.push_str(text);
@@ -83,25 +126,17 @@ impl Renderer {
                 self.push(&format!("{CODE_SPAN}{}</span>", escape(&code)));
             }
             Event::Html(html) | Event::InlineHtml(html) => {
-                self.count(html.trim_end());
-                self.push(&escape(html.trim_end()));
+                self.count(&html);
+                self.push(&escape(&html));
             }
             Event::FootnoteReference(name) => self.push(&format!("<sup>[{}]</sup>", escape(&name))),
-            Event::SoftBreak => self.push(" "),
-            Event::HardBreak => {
-                let prefix = self.prefix(true);
-                self.push(&format!("\n{prefix}"));
-            }
-            Event::Rule => {
-                self.start_block();
-                self.push(&format!("{MUTED_SPAN}{}</span>", "─".repeat(32)));
-            }
+            // Like GitHub comments, a single newline in the source is a line break.
+            Event::SoftBreak | Event::HardBreak => self.push("\n"),
+            Event::Rule => self.add_block(Block::Rule),
             Event::TaskListMarker(checked) => {
-                // Checkboxes replace the bullet of unordered items.
-                if let (Some(at), Some(None)) = (self.bullet_at.take(), self.lists.last()) {
-                    self.out.truncate(at);
+                if let Some(Container::Item(item)) = self.stack.last_mut() {
+                    item.task = Some(checked);
                 }
-                self.push(if checked { "☑ " } else { "☐ " });
             }
             Event::Text(_) => unreachable!(),
         }
@@ -109,67 +144,47 @@ impl Renderer {
 
     fn start(&mut self, tag: Tag<'_>) {
         match tag {
-            Tag::Paragraph | Tag::HtmlBlock => self.start_block(),
+            Tag::Paragraph | Tag::HtmlBlock => self.open_inline(InlineKind::Paragraph),
             Tag::Heading { level, .. } => {
-                self.start_block();
-                let size = match level {
-                    HeadingLevel::H1 => "xx-large",
-                    HeadingLevel::H2 => "x-large",
-                    HeadingLevel::H3 => "large",
-                    _ => "medium",
+                let level = match level {
+                    HeadingLevel::H1 => 1,
+                    HeadingLevel::H2 => 2,
+                    HeadingLevel::H3 => 3,
+                    HeadingLevel::H4 => 4,
+                    HeadingLevel::H5 => 5,
+                    HeadingLevel::H6 => 6,
                 };
-                self.push(&format!(r#"<span weight="bold" size="{size}">"#));
+                self.open_inline(InlineKind::Heading(level));
             }
             Tag::BlockQuote(kind) => {
-                self.quote_depth += 1;
-                if let Some(kind) = kind {
-                    let label = match kind {
-                        BlockQuoteKind::Note => "Note",
-                        BlockQuoteKind::Tip => "Tip",
-                        BlockQuoteKind::Important => "Important",
-                        BlockQuoteKind::Warning => "Warning",
-                        BlockQuoteKind::Caution => "Caution",
-                    };
-                    self.start_block();
-                    self.push(&format!("<b>{label}</b>"));
-                }
+                self.finish_inline();
+                let kind = kind.map(|kind| match kind {
+                    BlockQuoteKind::Note => "Note",
+                    BlockQuoteKind::Tip => "Tip",
+                    BlockQuoteKind::Important => "Important",
+                    BlockQuoteKind::Warning => "Warning",
+                    BlockQuoteKind::Caution => "Caution",
+                });
+                self.stack.push(Container::Quote { kind, blocks: Vec::new() });
             }
             Tag::CodeBlock(kind) => {
-                self.start_block();
-                if let CodeBlockKind::Fenced(lang) = kind
-                    && !lang.is_empty()
-                {
-                    self.push(&format!("{MUTED_SPAN}<small>{}</small></span>\n{}", escape(&lang), self.prefix(true)));
-                }
-                self.code_block = Some(String::new());
+                self.finish_inline();
+                let lang = match kind {
+                    CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.into_string()),
+                    _ => None,
+                };
+                self.code_block = Some((lang, String::new()));
             }
             Tag::List(start) => {
-                if self.lists.is_empty() && !self.out.is_empty() {
-                    self.out.push('\n');
-                }
-                self.lists.push(start);
+                self.finish_inline();
+                self.stack.push(Container::List { start, items: Vec::new() });
             }
             Tag::Item => {
-                if !self.out.is_empty() {
-                    self.out.push('\n');
-                }
-                let mut line = self.prefix(false);
-                line.push_str(&INDENT.repeat(self.lists.len().saturating_sub(1)));
-                let bullet = match self.lists.last_mut() {
-                    Some(Some(n)) => {
-                        let bullet = format!("{n}. ");
-                        *n += 1;
-                        bullet
-                    }
-                    _ => "• ".to_owned(),
-                };
-                self.out.push_str(&line);
-                self.bullet_at = Some(self.out.len());
-                self.out.push_str(&bullet);
-                self.item_fresh = true;
+                self.finish_inline();
+                self.stack.push(Container::Item(ListItem::default()));
             }
             Tag::Table(alignments) => {
-                self.start_block();
+                self.finish_inline();
                 self.table = Some(Table { alignments, ..Table::default() });
             }
             Tag::TableHead | Tag::TableRow => {
@@ -202,20 +217,32 @@ impl Renderer {
 
     fn end(&mut self, tag: TagEnd) {
         match tag {
-            TagEnd::Heading(_) => self.push("</span>"),
-            TagEnd::BlockQuote(_) => self.quote_depth = self.quote_depth.saturating_sub(1),
+            TagEnd::Paragraph | TagEnd::HtmlBlock | TagEnd::Heading(_) => self.finish_inline(),
+            TagEnd::BlockQuote(_) => {
+                self.finish_inline();
+                if let Some(Container::Quote { kind, blocks }) = self.stack.pop() {
+                    self.add_block(Block::Quote { kind, blocks });
+                }
+            }
             TagEnd::CodeBlock => {
-                let code = self.code_block.take().unwrap_or_default();
-                let separator = format!("\n{}", self.prefix(true));
-                let body = escape(code.trim_end_matches('\n')).replace('\n', &separator);
-                self.push(&format!("{CODE_SPAN}{body}</span>"));
+                if let Some((lang, code)) = self.code_block.take() {
+                    let markup = escape(code.trim_end_matches('\n'));
+                    self.add_block(Block::Code { lang, markup });
+                }
             }
             TagEnd::List(_) => {
-                self.lists.pop();
+                self.finish_inline();
+                if let Some(Container::List { start, items }) = self.stack.pop() {
+                    self.add_block(Block::List { start, items });
+                }
             }
             TagEnd::Item => {
-                self.item_fresh = false;
-                self.bullet_at = None;
+                self.finish_inline();
+                if let Some(Container::Item(item)) = self.stack.pop()
+                    && let Some(Container::List { items, .. }) = self.stack.last_mut()
+                {
+                    items.push(item);
+                }
             }
             TagEnd::TableHead => {
                 if let Some(table) = &mut self.table {
@@ -231,7 +258,7 @@ impl Renderer {
             }
             TagEnd::Table => {
                 if let Some(table) = self.table.take() {
-                    self.render_table(table);
+                    self.add_block(Block::Table(render_table(&table)));
                 }
             }
             TagEnd::Emphasis => self.push("</i>"),
@@ -260,37 +287,47 @@ impl Renderer {
         }
     }
 
-    /// Separates a new block from what came before and writes the line prefix.
-    fn start_block(&mut self) {
-        if self.item_fresh {
-            self.item_fresh = false;
+    fn open_inline(&mut self, kind: InlineKind) {
+        self.finish_inline();
+        self.inline = Some(Inline { kind, markup: String::new() });
+    }
+
+    /// Turns the paragraph or heading being collected into a block.
+    fn finish_inline(&mut self) {
+        let Some(Inline { kind, markup }) = self.inline.take() else {
+            return;
+        };
+        let markup = markup.trim_end_matches('\n').to_owned();
+        if markup.trim().is_empty() {
             return;
         }
-        if !self.out.is_empty() {
-            self.out.push('\n');
-            if self.lists.is_empty() {
-                self.out.push('\n');
-            }
-        }
-        let prefix = self.prefix(true);
-        self.out.push_str(&prefix);
+        self.add_block(match kind {
+            InlineKind::Paragraph => Block::Paragraph(markup),
+            InlineKind::Heading(level) => Block::Heading(level, markup),
+        });
     }
 
-    /// Quote bars, plus list indentation for lines that continue an item.
-    fn prefix(&self, continuation: bool) -> String {
-        let mut prefix = format!("{MUTED_SPAN}▎</span> ").repeat(self.quote_depth);
-        if continuation {
-            prefix.push_str(&INDENT.repeat(self.lists.len()));
+    fn add_block(&mut self, block: Block) {
+        self.finish_inline();
+        match self.stack.last_mut() {
+            Some(Container::Root(blocks) | Container::Quote { blocks, .. }) => blocks.push(block),
+            Some(Container::Item(item)) => item.blocks.push(block),
+            // Lists only ever contain items.
+            Some(Container::List { .. }) | None => {}
         }
-        prefix
     }
 
+    /// Appends inline markup to the table cell or paragraph being built. Tight list items
+    /// have text without a paragraph around it, so one is opened on demand.
     fn push(&mut self, markup: &str) {
-        self.item_fresh = false;
-        match self.table.as_mut().and_then(|t| t.cell.as_mut()) {
-            Some(cell) => cell.markup.push_str(markup),
-            None => self.out.push_str(markup),
+        if let Some(cell) = self.table.as_mut().and_then(|t| t.cell.as_mut()) {
+            cell.markup.push_str(markup);
+            return;
         }
+        self.inline
+            .get_or_insert_with(|| Inline { kind: InlineKind::Paragraph, markup: String::new() })
+            .markup
+            .push_str(markup);
     }
 
     fn count(&mut self, text: &str) {
@@ -326,58 +363,56 @@ impl Renderer {
         }
         self.push(&escape(rest));
     }
+}
 
-    fn render_table(&mut self, table: Table) {
-        let column_count = table.rows.iter().map(Vec::len).max().unwrap_or(0);
-        let mut widths = vec![0; column_count];
-        for row in &table.rows {
-            for (i, cell) in row.iter().enumerate() {
-                widths[i] = widths[i].max(cell.width);
-            }
+fn render_table(table: &Table) -> String {
+    let column_count = table.rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut widths = vec![0; column_count];
+    for row in &table.rows {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.width);
         }
-
-        let divider = format!("{MUTED_SPAN} │ </span>");
-        let mut lines = Vec::new();
-        for (row_index, row) in table.rows.iter().enumerate() {
-            let is_header = row_index < table.header_rows;
-            let mut line = String::new();
-            for (i, width) in widths.iter().enumerate() {
-                if i > 0 {
-                    line.push_str(&divider);
-                }
-                let (markup, cell_width) = row.get(i).map_or(("", 0), |c| (c.markup.as_str(), c.width));
-                let pad = width - cell_width;
-                let (left, right) = match table.alignments.get(i) {
-                    Some(Alignment::Right) => (pad, 0),
-                    Some(Alignment::Center) => (pad / 2, pad - pad / 2),
-                    _ => (0, pad),
-                };
-                line.push_str(&" ".repeat(left));
-                if is_header {
-                    line.push_str(&format!("<b>{markup}</b>"));
-                } else {
-                    line.push_str(markup);
-                }
-                line.push_str(&" ".repeat(right));
-            }
-            lines.push(line);
-            if row_index + 1 == table.header_rows {
-                let rule: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
-                lines.push(format!("{MUTED_SPAN}{}</span>", rule.join("─┼─")));
-            }
-        }
-
-        let separator = format!("\n{}", self.prefix(true));
-        self.push(&format!(r#"<span font_family="monospace">{}</span>"#, lines.join(&separator)));
     }
+
+    let divider = format!("{MUTED_SPAN} │ </span>");
+    let mut lines = Vec::new();
+    for (row_index, row) in table.rows.iter().enumerate() {
+        let is_header = row_index < table.header_rows;
+        let mut line = String::new();
+        for (i, width) in widths.iter().enumerate() {
+            if i > 0 {
+                line.push_str(&divider);
+            }
+            let (markup, cell_width) = row.get(i).map_or(("", 0), |c| (c.markup.as_str(), c.width));
+            let pad = width - cell_width;
+            let (left, right) = match table.alignments.get(i) {
+                Some(Alignment::Right) => (pad, 0),
+                Some(Alignment::Center) => (pad / 2, pad - pad / 2),
+                _ => (0, pad),
+            };
+            line.push_str(&" ".repeat(left));
+            if is_header {
+                line.push_str(&format!("<b>{markup}</b>"));
+            } else {
+                line.push_str(markup);
+            }
+            line.push_str(&" ".repeat(right));
+        }
+        lines.push(line);
+        if row_index + 1 == table.header_rows {
+            let rule: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
+            lines.push(format!("{MUTED_SPAN}{}</span>", rule.join("─┼─")));
+        }
+    }
+    format!(r#"<span font_family="monospace">{}</span>"#, lines.join("\n"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::to_pango;
+    use super::{Block, parse};
 
     /// `<a href>` is a GtkLabel extension, so links are stripped before asking Pango.
-    fn is_valid_markup(markup: &str) -> bool {
+    fn assert_valid_markup(markup: &str) {
         let mut plain = String::new();
         let mut rest = markup;
         while let Some(start) = rest.find("<a href=") {
@@ -386,29 +421,68 @@ mod tests {
         }
         plain.push_str(rest);
         let plain = plain.replace("</a>", "");
-        gtk::pango::parse_markup(&plain, '\0').map_err(|e| eprintln!("{e}")).is_ok()
+        if let Err(e) = gtk::pango::parse_markup(&plain, '\0') {
+            panic!("invalid markup ({e}): {markup}");
+        }
+    }
+
+    fn assert_all_valid(blocks: &[Block]) {
+        for block in blocks {
+            match block {
+                Block::Paragraph(m) | Block::Heading(_, m) | Block::Table(m) => assert_valid_markup(m),
+                Block::Code { markup, .. } => assert_valid_markup(markup),
+                Block::Quote { blocks, .. } => assert_all_valid(blocks),
+                Block::List { items, .. } => items.iter().for_each(|i| assert_all_valid(&i.blocks)),
+                Block::Rule => {}
+            }
+        }
     }
 
     #[test]
     fn renders_inline_styles() {
-        let out = to_pango("Some **bold**, *italic*, ~~gone~~ and `code <x>`.");
-        assert!(out.contains("<b>bold</b>"));
-        assert!(out.contains("<i>italic</i>"));
-        assert!(out.contains("<s>gone</s>"));
-        assert!(out.contains("code &lt;x&gt;"));
-        assert!(is_valid_markup(&out), "{out}");
+        let blocks = parse("Some **bold**, *italic*, ~~gone~~ and `code <x>`.");
+        let [Block::Paragraph(p)] = blocks.as_slice() else { panic!("{blocks:?}") };
+        assert!(p.contains("<b>bold</b>") && p.contains("<i>italic</i>") && p.contains("<s>gone</s>"));
+        assert!(p.contains("code &lt;x&gt;"));
+        assert_all_valid(&blocks);
+    }
+
+    #[test]
+    fn single_newlines_are_line_breaks() {
+        let blocks = parse("first line\nsecond line\n\nnext paragraph");
+        let [Block::Paragraph(a), Block::Paragraph(b)] = blocks.as_slice() else { panic!("{blocks:?}") };
+        assert_eq!(a, "first line\nsecond line");
+        assert_eq!(b, "next paragraph");
+    }
+
+    #[test]
+    fn builds_nested_and_task_lists() {
+        let blocks = parse("- [x] done\n- [ ] todo\n  1. nested\n  2. list\n\n3. three\n4. four");
+        let [Block::List { start: None, items }, Block::List { start: Some(3), items: numbered }] = blocks.as_slice()
+        else {
+            panic!("{blocks:?}")
+        };
+        assert_eq!(items[0].task, Some(true));
+        assert_eq!(items[1].task, Some(false));
+        let [Block::Paragraph(todo), Block::List { start: Some(1), items: nested }] = items[1].blocks.as_slice() else {
+            panic!("{:?}", items[1].blocks)
+        };
+        assert_eq!(todo, "todo");
+        assert_eq!(nested.len(), 2);
+        assert_eq!(numbered.len(), 2);
     }
 
     #[test]
     fn renders_gfm_blocks_as_valid_markup() {
         let md = "# Title\n\nIntro with https://example.com/a_b?x=1&y=2.\n\n\
-                  - [x] done\n- [ ] todo\n  1. nested\n  2. list\n\n\
                   > quoted <tag>\n\n```rust\nfn main() {}\n```\n\n\
                   | a | b |\n|:-|-:|\n| 1 | **22** |\n\n---\n\n![alt](img.png) [link](https://x.y)";
-        let out = to_pango(md);
-        assert!(out.contains("☑ done") && out.contains("☐ todo"));
-        assert!(out.contains(r#"<a href="https://example.com/a_b?x=1&amp;y=2">"#), "{out}");
-        assert!(out.contains("1. nested"));
-        assert!(is_valid_markup(&out), "{out}");
+        let blocks = parse(md);
+        assert!(matches!(blocks[0], Block::Heading(1, _)));
+        let Block::Paragraph(intro) = &blocks[1] else { panic!("{blocks:?}") };
+        assert!(intro.contains(r#"<a href="https://example.com/a_b?x=1&amp;y=2">"#), "{intro}");
+        assert!(matches!(&blocks[3], Block::Code { lang: Some(l), .. } if l == "rust"));
+        assert!(matches!(blocks[5], Block::Rule));
+        assert_all_valid(&blocks);
     }
 }

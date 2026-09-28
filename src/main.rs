@@ -10,11 +10,9 @@ use adw::prelude::*;
 use clap::Parser;
 use gtk::{gio, glib};
 
-/// Kanban board for tickets stored in a local SQLite project file.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
-    /// Path to the project database; created if it does not exist.
     #[arg(short, long, value_name = "PATH", default_value = "./project.db")]
     project: PathBuf,
 }

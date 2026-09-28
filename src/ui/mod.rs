@@ -1,4 +1,5 @@
 mod dialog;
+mod markdown_view;
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
@@ -40,6 +41,9 @@ fn load_css() {
             &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+        // Dialogs open and close instantly. libadwaita has no per-dialog switch, only this
+        // app-wide setting, so it also turns off toast and view-switch transitions.
+        gtk::Settings::for_display(&display).set_gtk_enable_animations(false);
     }
 }
 

@@ -7,8 +7,7 @@ use adw::prelude::*;
 use chrono::{DateTime, Local, Utc};
 use gtk::glib::{self, clone};
 
-use super::Board;
-use crate::markdown;
+use super::{Board, markdown_view};
 use crate::model::{Status, Ticket};
 
 pub enum Target {
@@ -29,7 +28,8 @@ struct TicketDialog {
     toasts: adw::ToastOverlay,
     title_label: gtk::Label,
     meta_label: gtk::Label,
-    details_label: gtk::Label,
+    /// Holds the rendered markdown, rebuilt each time the preview is shown.
+    details: gtk::Box,
     title_row: adw::EntryRow,
     details_buffer: gtk::TextBuffer,
     /// Column a new ticket is created in.
@@ -91,13 +91,8 @@ impl TicketDialog {
             .xalign(0.0)
             .css_classes(["dim-label", "caption"])
             .build();
-        let details_label = gtk::Label::builder()
-            .use_markup(true)
-            .wrap(true)
-            .wrap_mode(gtk::pango::WrapMode::WordChar)
-            .xalign(0.0)
-            .yalign(0.0)
-            .selectable(true)
+        let details = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
             .css_classes(["ticket-preview"])
             .build();
         let preview_box = gtk::Box::builder()
@@ -111,7 +106,7 @@ impl TicketDialog {
         preview_box.append(&title_label);
         preview_box.append(&meta_label);
         preview_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        preview_box.append(&details_label);
+        preview_box.append(&details);
         let preview = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .child(&preview_box)
@@ -195,7 +190,7 @@ impl TicketDialog {
             toasts,
             title_label,
             meta_label,
-            details_label,
+            details,
             title_row,
             details_buffer,
             status,
@@ -303,12 +298,18 @@ impl TicketDialog {
             format_time(ticket.created_at),
             format_time(ticket.updated_at),
         ));
+        while let Some(child) = self.details.first_child() {
+            self.details.remove(&child);
+        }
         if ticket.details.trim().is_empty() {
-            self.details_label.set_markup("<i>No details.</i>");
-            self.details_label.add_css_class("dim-label");
+            let empty = gtk::Label::builder()
+                .label("No details.")
+                .xalign(0.0)
+                .css_classes(["dim-label"])
+                .build();
+            self.details.append(&empty);
         } else {
-            self.details_label.set_markup(&markdown::to_pango(&ticket.details));
-            self.details_label.remove_css_class("dim-label");
+            self.details.append(&markdown_view::build(&ticket.details));
         }
 
         self.stack.set_visible_child_name("preview");

@@ -84,3 +84,19 @@ dialog.alert .response-area > button {
   font-size: 12.5pt;
   line-height: 1.4;
 }
+
+.md-code {
+  background-color: alpha(currentColor, 0.07);
+  border-radius: 5px;
+  padding: 8px 10px;
+}
+
+.md-quote {
+  border-left: 3px solid alpha(currentColor, 0.25);
+  padding-left: 12px;
+  color: alpha(currentColor, 0.8);
+}
+
+.md-list-marker {
+  color: alpha(currentColor, 0.75);
+}
