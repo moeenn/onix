@@ -49,7 +49,6 @@ impl Status {
 pub struct Ticket {
     pub id: i64,
     pub title: String,
-    /// GitHub-flavored markdown.
     pub details: String,
     pub status: Status,
     pub created_at: DateTime<Utc>,

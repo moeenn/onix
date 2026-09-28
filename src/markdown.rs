@@ -1,8 +1,7 @@
-//! Parses GitHub-flavored markdown into blocks whose text is Pango markup, ready to be laid
-//! out as GTK widgets (see `ui::markdown_view`).
-
 use gtk::glib::markup_escape_text;
-use pulldown_cmark::{Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
+};
 
 const CODE_SPAN: &str = r##"<span font_family="monospace" background="#808080" bgalpha="20%">"##;
 const MUTED_SPAN: &str = r##"<span foreground="#808080">"##;
@@ -14,10 +13,19 @@ pub enum Block {
     /// Level 1–6 and inline markup.
     Heading(u8, String),
     /// Escaped code text; `lang` comes from the fence info string.
-    Code { lang: Option<String>, markup: String },
-    Quote { kind: Option<&'static str>, blocks: Vec<Block> },
+    Code {
+        lang: Option<String>,
+        markup: String,
+    },
+    Quote {
+        kind: Option<&'static str>,
+        blocks: Vec<Block>,
+    },
     /// `start` is the first number of an ordered list, `None` for bullets.
-    List { start: Option<u64>, items: Vec<ListItem> },
+    List {
+        start: Option<u64>,
+        items: Vec<ListItem>,
+    },
     /// Monospace markup with columns already aligned.
     Table(String),
     Rule,
@@ -25,7 +33,6 @@ pub enum Block {
 
 #[derive(Debug, Default)]
 pub struct ListItem {
-    /// `Some(checked)` for task list items.
     pub task: Option<bool>,
     pub blocks: Vec<Block>,
 }
@@ -35,15 +42,19 @@ pub fn parse(markdown: &str) -> Vec<Block> {
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_GFM;
+
     let mut builder = Builder {
         stack: vec![Container::Root(Vec::new())],
         ..Builder::default()
     };
+
     for event in Parser::new_ext(markdown, options) {
         builder.event(event);
     }
+
     builder.flush_text();
     builder.finish_inline();
+
     match builder.stack.into_iter().next() {
         Some(Container::Root(blocks)) => blocks,
         _ => Vec::new(),
@@ -56,8 +67,14 @@ fn escape(text: &str) -> String {
 
 enum Container {
     Root(Vec<Block>),
-    Quote { kind: Option<&'static str>, blocks: Vec<Block> },
-    List { start: Option<u64>, items: Vec<ListItem> },
+    Quote {
+        kind: Option<&'static str>,
+        blocks: Vec<Block>,
+    },
+    List {
+        start: Option<u64>,
+        items: Vec<ListItem>,
+    },
     Item(ListItem),
 }
 
@@ -165,7 +182,10 @@ impl Builder {
                     BlockQuoteKind::Warning => "Warning",
                     BlockQuoteKind::Caution => "Caution",
                 });
-                self.stack.push(Container::Quote { kind, blocks: Vec::new() });
+                self.stack.push(Container::Quote {
+                    kind,
+                    blocks: Vec::new(),
+                });
             }
             Tag::CodeBlock(kind) => {
                 self.finish_inline();
@@ -177,7 +197,10 @@ impl Builder {
             }
             Tag::List(start) => {
                 self.finish_inline();
-                self.stack.push(Container::List { start, items: Vec::new() });
+                self.stack.push(Container::List {
+                    start,
+                    items: Vec::new(),
+                });
             }
             Tag::Item => {
                 self.finish_inline();
@@ -185,7 +208,10 @@ impl Builder {
             }
             Tag::Table(alignments) => {
                 self.finish_inline();
-                self.table = Some(Table { alignments, ..Table::default() });
+                self.table = Some(Table {
+                    alignments,
+                    ..Table::default()
+                });
             }
             Tag::TableHead | Tag::TableRow => {
                 if let Some(table) = &mut self.table {
@@ -209,7 +235,10 @@ impl Builder {
                 self.link_depth += 1;
             }
             Tag::Image { dest_url, .. } => {
-                self.image = Some(Image { url: dest_url.into_string(), alt: String::new() });
+                self.image = Some(Image {
+                    url: dest_url.into_string(),
+                    alt: String::new(),
+                });
             }
             _ => {}
         }
@@ -277,7 +306,11 @@ impl Builder {
                     let label = if alt.is_empty() { url.clone() } else { alt };
                     self.count(&label);
                     if self.link_depth == 0 {
-                        self.push(&format!(r#"<a href="{}">🖼 {}</a>"#, escape(&url), escape(&label)));
+                        self.push(&format!(
+                            r#"<a href="{}">🖼 {}</a>"#,
+                            escape(&url),
+                            escape(&label)
+                        ));
                     } else {
                         self.push(&format!("🖼 {}", escape(&label)));
                     }
@@ -289,7 +322,10 @@ impl Builder {
 
     fn open_inline(&mut self, kind: InlineKind) {
         self.finish_inline();
-        self.inline = Some(Inline { kind, markup: String::new() });
+        self.inline = Some(Inline {
+            kind,
+            markup: String::new(),
+        });
     }
 
     /// Turns the paragraph or heading being collected into a block.
@@ -325,7 +361,10 @@ impl Builder {
             return;
         }
         self.inline
-            .get_or_insert_with(|| Inline { kind: InlineKind::Paragraph, markup: String::new() })
+            .get_or_insert_with(|| Inline {
+                kind: InlineKind::Paragraph,
+                markup: String::new(),
+            })
             .markup
             .push_str(markup);
     }
@@ -352,7 +391,11 @@ impl Builder {
     /// GFM autolinks bare `http(s)://` URLs.
     fn push_linkified(&mut self, text: &str) {
         let mut rest = text;
-        while let Some(start) = ["https://", "http://"].iter().filter_map(|scheme| rest.find(scheme)).min() {
+        while let Some(start) = ["https://", "http://"]
+            .iter()
+            .filter_map(|scheme| rest.find(scheme))
+            .min()
+        {
             let (before, tail) = rest.split_at(start);
             let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
             let url = tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '\'', '"']);
@@ -404,7 +447,10 @@ fn render_table(table: &Table) -> String {
             lines.push(format!("{MUTED_SPAN}{}</span>", rule.join("─┼─")));
         }
     }
-    format!(r#"<span font_family="monospace">{}</span>"#, lines.join("\n"))
+    format!(
+        r#"<span font_family="monospace">{}</span>"#,
+        lines.join("\n")
+    )
 }
 
 #[cfg(test)]
@@ -429,7 +475,9 @@ mod tests {
     fn assert_all_valid(blocks: &[Block]) {
         for block in blocks {
             match block {
-                Block::Paragraph(m) | Block::Heading(_, m) | Block::Table(m) => assert_valid_markup(m),
+                Block::Paragraph(m) | Block::Heading(_, m) | Block::Table(m) => {
+                    assert_valid_markup(m)
+                }
                 Block::Code { markup, .. } => assert_valid_markup(markup),
                 Block::Quote { blocks, .. } => assert_all_valid(blocks),
                 Block::List { items, .. } => items.iter().for_each(|i| assert_all_valid(&i.blocks)),
@@ -441,8 +489,12 @@ mod tests {
     #[test]
     fn renders_inline_styles() {
         let blocks = parse("Some **bold**, *italic*, ~~gone~~ and `code <x>`.");
-        let [Block::Paragraph(p)] = blocks.as_slice() else { panic!("{blocks:?}") };
-        assert!(p.contains("<b>bold</b>") && p.contains("<i>italic</i>") && p.contains("<s>gone</s>"));
+        let [Block::Paragraph(p)] = blocks.as_slice() else {
+            panic!("{blocks:?}")
+        };
+        assert!(
+            p.contains("<b>bold</b>") && p.contains("<i>italic</i>") && p.contains("<s>gone</s>")
+        );
         assert!(p.contains("code &lt;x&gt;"));
         assert_all_valid(&blocks);
     }
@@ -450,7 +502,9 @@ mod tests {
     #[test]
     fn single_newlines_are_line_breaks() {
         let blocks = parse("first line\nsecond line\n\nnext paragraph");
-        let [Block::Paragraph(a), Block::Paragraph(b)] = blocks.as_slice() else { panic!("{blocks:?}") };
+        let [Block::Paragraph(a), Block::Paragraph(b)] = blocks.as_slice() else {
+            panic!("{blocks:?}")
+        };
         assert_eq!(a, "first line\nsecond line");
         assert_eq!(b, "next paragraph");
     }
@@ -458,13 +512,26 @@ mod tests {
     #[test]
     fn builds_nested_and_task_lists() {
         let blocks = parse("- [x] done\n- [ ] todo\n  1. nested\n  2. list\n\n3. three\n4. four");
-        let [Block::List { start: None, items }, Block::List { start: Some(3), items: numbered }] = blocks.as_slice()
+        let [
+            Block::List { start: None, items },
+            Block::List {
+                start: Some(3),
+                items: numbered,
+            },
+        ] = blocks.as_slice()
         else {
             panic!("{blocks:?}")
         };
         assert_eq!(items[0].task, Some(true));
         assert_eq!(items[1].task, Some(false));
-        let [Block::Paragraph(todo), Block::List { start: Some(1), items: nested }] = items[1].blocks.as_slice() else {
+        let [
+            Block::Paragraph(todo),
+            Block::List {
+                start: Some(1),
+                items: nested,
+            },
+        ] = items[1].blocks.as_slice()
+        else {
             panic!("{:?}", items[1].blocks)
         };
         assert_eq!(todo, "todo");
@@ -479,8 +546,13 @@ mod tests {
                   | a | b |\n|:-|-:|\n| 1 | **22** |\n\n---\n\n![alt](img.png) [link](https://x.y)";
         let blocks = parse(md);
         assert!(matches!(blocks[0], Block::Heading(1, _)));
-        let Block::Paragraph(intro) = &blocks[1] else { panic!("{blocks:?}") };
-        assert!(intro.contains(r#"<a href="https://example.com/a_b?x=1&amp;y=2">"#), "{intro}");
+        let Block::Paragraph(intro) = &blocks[1] else {
+            panic!("{blocks:?}")
+        };
+        assert!(
+            intro.contains(r#"<a href="https://example.com/a_b?x=1&amp;y=2">"#),
+            "{intro}"
+        );
         assert!(matches!(&blocks[3], Block::Code { lang: Some(l), .. } if l == "rust"));
         assert!(matches!(blocks[5], Block::Rule));
         assert_all_valid(&blocks);

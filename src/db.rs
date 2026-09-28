@@ -81,7 +81,8 @@ impl ToSql for Status {
 impl FromSql for Status {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         let text = value.as_str()?;
-        Status::parse(text).ok_or_else(|| FromSqlError::Other(format!("unknown status {text:?}").into()))
+        Status::parse(text)
+            .ok_or_else(|| FromSqlError::Other(format!("unknown status {text:?}").into()))
     }
 }
 
@@ -131,7 +132,9 @@ impl Store {
             "SELECT id, title, details, status, created_at, updated_at
              FROM tickets ORDER BY position, id",
         )?;
-        let tickets = stmt.query_map([], ticket_from_row)?.collect::<rusqlite::Result<_>>()?;
+        let tickets = stmt
+            .query_map([], ticket_from_row)?
+            .collect::<rusqlite::Result<_>>()?;
         Ok(tickets)
     }
 
@@ -150,7 +153,10 @@ impl Store {
     pub fn create_ticket(&mut self, status: Status, title: &str, details: &str) -> Result<Ticket> {
         let now = Utc::now();
         let tx = self.conn.transaction()?;
-        tx.execute("UPDATE tickets SET position = position + 1 WHERE status = ?1", [status])?;
+        tx.execute(
+            "UPDATE tickets SET position = position + 1 WHERE status = ?1",
+            [status],
+        )?;
         tx.execute(
             "INSERT INTO tickets (title, details, status, position, created_at, updated_at)
              VALUES (?1, ?2, ?3, 0, ?4, ?4)",
@@ -173,7 +179,11 @@ impl Store {
     }
 
     pub fn delete_ticket(&mut self, id: i64) -> Result<()> {
-        if self.conn.execute("DELETE FROM tickets WHERE id = ?1", [id])? == 0 {
+        if self
+            .conn
+            .execute("DELETE FROM tickets WHERE id = ?1", [id])?
+            == 0
+        {
             return Err(Error::NotFound(id));
         }
         Ok(())
@@ -183,13 +193,16 @@ impl Store {
     pub fn move_ticket(&mut self, id: i64, status: Status, index: usize) -> Result<()> {
         let tx = self.conn.transaction()?;
         let current: Status = tx
-            .query_row("SELECT status FROM tickets WHERE id = ?1", [id], |r| r.get(0))
+            .query_row("SELECT status FROM tickets WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
             .optional()?
             .ok_or(Error::NotFound(id))?;
 
         let mut order: Vec<i64> = {
-            let mut stmt =
-                tx.prepare("SELECT id FROM tickets WHERE status = ?1 AND id <> ?2 ORDER BY position, id")?;
+            let mut stmt = tx.prepare(
+                "SELECT id FROM tickets WHERE status = ?1 AND id <> ?2 ORDER BY position, id",
+            )?;
             stmt.query_map(params![status, id], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?
         };
@@ -228,6 +241,7 @@ fn validate(conn: &Connection) -> Result<()> {
     let application_id: i32 = conn
         .pragma_query_value(None, "application_id", |r| r.get(0))
         .map_err(|e| Error::Invalid(format!("file is not a SQLite database ({e})")))?;
+
     if application_id != APPLICATION_ID {
         return Err(Error::Invalid("SQLite file was not created by orgx".into()));
     }
@@ -241,26 +255,43 @@ fn validate(conn: &Connection) -> Result<()> {
 
     let integrity: String = conn.pragma_query_value(None, "quick_check", |r| r.get(0))?;
     if integrity != "ok" {
-        return Err(Error::Invalid(format!("integrity check failed: {integrity}")));
+        return Err(Error::Invalid(format!(
+            "integrity check failed: {integrity}"
+        )));
     }
 
-    let mut stmt = conn.prepare("SELECT name, type, \"notnull\", pk FROM pragma_table_info('tickets') ORDER BY cid")?;
+    let mut stmt = conn.prepare(
+        "SELECT name, type, \"notnull\", pk FROM pragma_table_info('tickets') ORDER BY cid",
+    )?;
     let columns: Vec<(String, String, bool, bool)> = stmt
         .query_map([], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0, r.get::<_, i64>(3)? != 0))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get::<_, i64>(2)? != 0,
+                r.get::<_, i64>(3)? != 0,
+            ))
         })?
         .collect::<rusqlite::Result<_>>()?;
+
     if columns.is_empty() {
         return Err(Error::Invalid("missing `tickets` table".into()));
     }
+
     let schema_matches = columns.len() == TICKET_COLUMNS.len()
         && columns.iter().zip(TICKET_COLUMNS).all(
             |((name, ty, not_null, pk), (exp_name, exp_ty, exp_not_null, exp_pk))| {
-                name == exp_name && ty.eq_ignore_ascii_case(exp_ty) && not_null == exp_not_null && pk == exp_pk
+                name == exp_name
+                    && ty.eq_ignore_ascii_case(exp_ty)
+                    && not_null == exp_not_null
+                    && pk == exp_pk
             },
         );
+
     if !schema_matches {
-        return Err(Error::Invalid("`tickets` table does not match the expected schema".into()));
+        return Err(Error::Invalid(
+            "`tickets` table does not match the expected schema".into(),
+        ));
     }
     Ok(())
 }
@@ -280,7 +311,9 @@ mod tests {
         let path = temp_path("reopen");
         let mut store = Store::open(&path).unwrap();
         store.create_ticket(Status::Backlog, "first", "").unwrap();
-        let second = store.create_ticket(Status::Backlog, "second", "**hi**").unwrap();
+        let second = store
+            .create_ticket(Status::Backlog, "second", "**hi**")
+            .unwrap();
         drop(store);
 
         let store = Store::open(&path).unwrap();
@@ -328,12 +361,19 @@ mod tests {
     #[test]
     fn rejects_foreign_files() {
         let path = temp_path("foreign-text");
-        std::fs::write(&path, "definitely not sqlite, just some text that is long enough").unwrap();
+        std::fs::write(
+            &path,
+            "definitely not sqlite, just some text that is long enough",
+        )
+        .unwrap();
         assert!(matches!(Store::open(&path), Err(Error::Invalid(_))));
         std::fs::remove_file(&path).unwrap();
 
         let path = temp_path("foreign-db");
-        Connection::open(&path).unwrap().execute_batch("CREATE TABLE tickets (id INTEGER)").unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE tickets (id INTEGER)")
+            .unwrap();
         assert!(matches!(Store::open(&path), Err(Error::Invalid(_))));
         std::fs::remove_file(&path).unwrap();
     }

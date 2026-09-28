@@ -68,7 +68,10 @@ impl Column {
         let count = gtk::Label::builder()
             .css_classes(["dim-label", "numeric", "caption"])
             .build();
-        let header = gtk::Box::builder().spacing(8).css_classes(["column-header"]).build();
+        let header = gtk::Box::builder()
+            .spacing(8)
+            .css_classes(["column-header"])
+            .build();
         header.append(&title);
         header.append(&count);
 
@@ -334,7 +337,9 @@ impl Board {
         card.update_property(&[gtk::accessible::Property::Label(&ticket.title)]);
         card.append(&title);
 
-        let click = gtk::GestureClick::builder().button(gdk::BUTTON_PRIMARY).build();
+        let click = gtk::GestureClick::builder()
+            .button(gdk::BUTTON_PRIMARY)
+            .build();
         click.connect_released(clone!(
             #[weak]
             board,
@@ -363,7 +368,9 @@ impl Board {
         ));
         card.add_controller(keys);
 
-        let drag = gtk::DragSource::builder().actions(gdk::DragAction::MOVE).build();
+        let drag = gtk::DragSource::builder()
+            .actions(gdk::DragAction::MOVE)
+            .build();
         let hotspot = Rc::new(Cell::new((0, 0)));
         drag.connect_prepare(clone!(
             #[strong]
@@ -443,7 +450,12 @@ impl Board {
 
     /// Where a drop at (`x`, `y`) in the column lands: the insertion index among the column's
     /// tickets (excluding the dragged one), and the visible card to mark with `true` = above.
-    fn drop_position(&self, column: &Column, x: f64, y: f64) -> (usize, Option<(gtk::Widget, bool)>) {
+    fn drop_position(
+        &self,
+        column: &Column,
+        x: f64,
+        y: f64,
+    ) -> (usize, Option<(gtk::Widget, bool)>) {
         let dragged = self.dragging.get();
         let entries = column.entries.borrow();
         let Some(point) = column
@@ -474,7 +486,9 @@ impl Board {
 
     fn drag_motion(&self, column_index: usize, x: f64, y: f64) {
         let (_, target) = self.drop_position(&self.columns[column_index], x, y);
-        self.set_indicator(target.map(|(card, above)| (card, if above { "drop-above" } else { "drop-below" })));
+        self.set_indicator(
+            target.map(|(card, above)| (card, if above { "drop-above" } else { "drop-below" })),
+        );
     }
 
     fn set_indicator(&self, indicator: Option<(gtk::Widget, &'static str)>) {
@@ -488,7 +502,13 @@ impl Board {
         *current = indicator;
     }
 
-    fn drop_ticket(self: &Rc<Self>, column_index: usize, value: &glib::Value, x: f64, y: f64) -> bool {
+    fn drop_ticket(
+        self: &Rc<Self>,
+        column_index: usize,
+        value: &glib::Value,
+        x: f64,
+        y: f64,
+    ) -> bool {
         let Ok(id) = value.get::<i64>() else {
             return false;
         };
@@ -496,7 +516,10 @@ impl Board {
         let (index, _) = self.drop_position(column, x, y);
         self.set_indicator(None);
 
-        let result = self.store.borrow_mut().move_ticket(id, column.status, index);
+        let result = self
+            .store
+            .borrow_mut()
+            .move_ticket(id, column.status, index);
         if let Err(e) = result {
             self.toast(&format!("Could not move ticket: {e}"));
             return false;
@@ -507,7 +530,12 @@ impl Board {
         true
     }
 
-    pub fn create_ticket(self: &Rc<Self>, status: Status, title: &str, details: &str) -> Result<Ticket, String> {
+    pub fn create_ticket(
+        self: &Rc<Self>,
+        status: Status,
+        title: &str,
+        details: &str,
+    ) -> Result<Ticket, String> {
         let ticket = self
             .store
             .borrow_mut()
@@ -520,7 +548,12 @@ impl Board {
         Ok(ticket)
     }
 
-    pub fn update_ticket(self: &Rc<Self>, id: i64, title: &str, details: &str) -> Result<Ticket, String> {
+    pub fn update_ticket(
+        self: &Rc<Self>,
+        id: i64,
+        title: &str,
+        details: &str,
+    ) -> Result<Ticket, String> {
         let ticket = self
             .store
             .borrow_mut()
@@ -531,7 +564,11 @@ impl Board {
     }
 
     pub fn delete_ticket(self: &Rc<Self>, id: i64) -> Result<(), String> {
-        let result = self.store.borrow_mut().delete_ticket(id).map_err(|e| e.to_string());
+        let result = self
+            .store
+            .borrow_mut()
+            .delete_ticket(id)
+            .map_err(|e| e.to_string());
         self.refresh();
         result
     }
@@ -555,7 +592,10 @@ mod tests {
         };
         assert!(Board::matches(&ticket, "ci pipe"));
         assert!(Board::matches(&ticket, "clippy"));
-        assert!(!Board::matches(&ticket, "sup ci"), "no fuzzy subsequence matches");
+        assert!(
+            !Board::matches(&ticket, "sup ci"),
+            "no fuzzy subsequence matches"
+        );
         assert!(!Board::matches(&ticket, "deploy"));
     }
 }
