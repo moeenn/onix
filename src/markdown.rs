@@ -1,9 +1,15 @@
+use std::ops::Range;
+
 use gtk::glib::markup_escape_text;
 use pulldown_cmark::{
     Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
 
-const CODE_SPAN: &str = r##"<span font_family="monospace" background="#808080" bgalpha="20%">"##;
+/// Inline code. `insert_hyphens` doubles as the marker `ui::code_spans` uses to find these
+/// spans and draw their rounded backgrounds.
+const CODE_SPAN: &str = r#"<span font_family="monospace" size="90%" insert_hyphens="false">"#;
+/// Narrow no-break spaces on either side leave room for the background's padding.
+const CODE_GAP: char = '\u{202F}';
 const MUTED_SPAN: &str = r##"<span foreground="#808080">"##;
 
 #[derive(Debug)]
@@ -33,8 +39,23 @@ pub enum Block {
 
 #[derive(Debug, Default)]
 pub struct ListItem {
-    pub task: Option<bool>,
+    pub task: Option<Task>,
     pub blocks: Vec<Block>,
+}
+
+/// A task list checkbox.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Task {
+    pub checked: bool,
+    /// Byte range of the `[ ]` / `[x]` marker in the markdown source.
+    pub marker: Range<usize>,
+}
+
+/// Returns `markdown` with the task marker at `marker` set to `checked`.
+pub fn set_task(markdown: &str, marker: &Range<usize>, checked: bool) -> String {
+    let mut updated = markdown.to_owned();
+    updated.replace_range(marker.clone(), if checked { "[x]" } else { "[ ]" });
+    updated
 }
 
 pub fn parse(markdown: &str) -> Vec<Block> {
@@ -48,8 +69,8 @@ pub fn parse(markdown: &str) -> Vec<Block> {
         ..Builder::default()
     };
 
-    for event in Parser::new_ext(markdown, options) {
-        builder.event(event);
+    for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
+        builder.event(event, range);
     }
 
     builder.flush_text();
@@ -122,7 +143,7 @@ struct Builder {
 }
 
 impl Builder {
-    fn event(&mut self, event: Event<'_>) {
+    fn event(&mut self, event: Event<'_>, range: Range<usize>) {
         if let Event::Text(text) = &event {
             if let Some((_, code)) = &mut self.code_block {
                 code.push_str(text);
@@ -140,7 +161,11 @@ impl Builder {
             Event::End(tag) => self.end(tag),
             Event::Code(code) | Event::InlineMath(code) | Event::DisplayMath(code) => {
                 self.count(&code);
-                self.push(&format!("{CODE_SPAN}{}</span>", escape(&code)));
+                self.count(&format!("{CODE_GAP}{CODE_GAP}"));
+                self.push(&format!(
+                    "{CODE_GAP}{CODE_SPAN}{}</span>{CODE_GAP}",
+                    escape(&code)
+                ));
             }
             Event::Html(html) | Event::InlineHtml(html) => {
                 self.count(&html);
@@ -152,7 +177,10 @@ impl Builder {
             Event::Rule => self.add_block(Block::Rule),
             Event::TaskListMarker(checked) => {
                 if let Some(Container::Item(item)) = self.stack.last_mut() {
-                    item.task = Some(checked);
+                    item.task = Some(Task {
+                        checked,
+                        marker: range,
+                    });
                 }
             }
             Event::Text(_) => unreachable!(),
@@ -522,8 +550,8 @@ mod tests {
         else {
             panic!("{blocks:?}")
         };
-        assert_eq!(items[0].task, Some(true));
-        assert_eq!(items[1].task, Some(false));
+        assert_eq!(items[0].task.as_ref().map(|t| t.checked), Some(true));
+        assert_eq!(items[1].task.as_ref().map(|t| t.checked), Some(false));
         let [
             Block::Paragraph(todo),
             Block::List {
@@ -556,5 +584,32 @@ mod tests {
         assert!(matches!(&blocks[3], Block::Code { lang: Some(l), .. } if l == "rust"));
         assert!(matches!(blocks[5], Block::Rule));
         assert_all_valid(&blocks);
+    }
+
+    #[test]
+    fn toggles_task_markers_in_source() {
+        let md = "intro\n\n- [ ] first\n  - [X] nested\n- [x] last\n";
+        let tasks: Vec<_> = {
+            fn collect(blocks: &[Block], out: &mut Vec<super::Task>) {
+                for block in blocks {
+                    if let Block::List { items, .. } = block {
+                        for item in items {
+                            out.extend(item.task.clone());
+                            collect(&item.blocks, out);
+                        }
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            collect(&parse(md), &mut out);
+            out
+        };
+        assert_eq!(tasks.len(), 3);
+        for task in &tasks {
+            assert!(matches!(&md[task.marker.clone()], "[ ]" | "[x]" | "[X]"));
+        }
+        let md = super::set_task(md, &tasks[0].marker, true);
+        let md = super::set_task(&md, &tasks[1].marker, false);
+        assert_eq!(md, "intro\n\n- [x] first\n  - [ ] nested\n- [x] last\n");
     }
 }

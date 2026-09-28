@@ -80,6 +80,18 @@ dialog.alert .response-area > button {
   line-height: 1.45;
 }
 
+/* The details editor sits in a `.card`, like the boxed title row; let its colors through
+   and show the same focus outline as the row. */
+.ticket-editor,
+.ticket-editor > text {
+  background-color: transparent;
+}
+
+.details-card:focus-within {
+  outline: 2px solid alpha(@accent_color, 0.5);
+  outline-offset: -2px;
+}
+
 .ticket-preview {
   font-size: 12.5pt;
   line-height: 1.4;
@@ -99,4 +111,19 @@ dialog.alert .response-area > button {
 
 .md-list-marker {
   color: alpha(currentColor, 0.75);
+}
+
+checkbutton.md-task {
+  padding: 0;
+}
+
+checkbutton.md-task check {
+  min-width: 14px;
+  min-height: 14px;
+  margin: 0;
+}
+
+checkbutton.md-task check:checked {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
 }

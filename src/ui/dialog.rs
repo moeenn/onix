@@ -1,13 +1,16 @@
 //! Modal for viewing, editing and creating tickets.
 
 use std::cell::RefCell;
+use std::ops::Range;
 use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
 use chrono::{DateTime, Local, Utc};
+use gtk::gdk;
 use gtk::glib::{self, clone};
 
-use super::{Board, markdown_view};
+use super::{Board, markdown_view, pointer};
+use crate::markdown;
 use crate::model::{Status, Ticket};
 
 pub enum Target {
@@ -17,6 +20,8 @@ pub enum Target {
 }
 
 struct TicketDialog {
+    /// For callbacks created after construction, such as preview checkboxes.
+    this: Weak<TicketDialog>,
     board: Weak<Board>,
     dialog: adw::Dialog,
     header: adw::HeaderBar,
@@ -43,17 +48,22 @@ pub fn open(board: &Rc<Board>, target: Target) {
         Target::New(status) => (status, None),
         Target::Existing(ticket) => (ticket.status, Some(ticket)),
     };
-    let this = Rc::new(TicketDialog::new(board, status, ticket.clone()));
+    let this =
+        Rc::new_cyclic(|weak| TicketDialog::new(weak.clone(), board, status, ticket.clone()));
     this.connect_signals();
     match &ticket {
         Some(ticket) => this.show_preview(ticket),
         None => this.show_editor(),
     }
     this.dialog.present(Some(board.window()));
+    if ticket.is_none() {
+        // Focus only takes once the dialog is in the window.
+        this.title_row.grab_focus();
+    }
 }
 
 impl TicketDialog {
-    fn new(board: &Rc<Board>, status: Status, ticket: Option<Ticket>) -> Self {
+    fn new(this: Weak<Self>, board: &Rc<Board>, status: Status, ticket: Option<Ticket>) -> Self {
         let edit_button = gtk::Button::builder()
             .label("Edit")
             .tooltip_text("Edit (Ctrl+E)")
@@ -117,9 +127,13 @@ impl TicketDialog {
         let title_list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
             .css_classes(["boxed-list"])
+            .margin_bottom(6)
             .build();
         title_list.append(&title_row);
-        if let Some(text) = title_row.delegate().and_then(|d| d.downcast::<gtk::Text>().ok()) {
+        if let Some(text) = title_row
+            .delegate()
+            .and_then(|d| d.downcast::<gtk::Text>().ok())
+        {
             trim_pasted_text_in_entry(&text);
         }
         let details_heading = gtk::Label::builder()
@@ -137,17 +151,23 @@ impl TicketDialog {
             // Extra space between lines, and between wrapped rows of one line.
             .pixels_below_lines(4)
             .pixels_inside_wrap(2)
-            .accepts_tab(false)
+            .accepts_tab(true)
             .css_classes(["ticket-editor"])
             .build();
         let details_buffer = details_view.buffer();
         trim_pasted_text_in_view(&details_view);
+        indent_with_spaces(&details_view);
+        // Tabs can still arrive by pasting. Tab stops need the editor's font, which is only
+        // known once it's realized.
+        details_view.connect_realize(|view| set_tab_width(view, TAB_WIDTH_CHARS));
         let details_scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
             .child(&details_view)
             .build();
-        let details_frame = gtk::Frame::builder().child(&details_scroller).build();
+        // Styled like the boxed title row above it.
+        details_scroller.add_css_class("card");
+        details_scroller.add_css_class("details-card");
         let editor = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(12)
@@ -158,7 +178,7 @@ impl TicketDialog {
             .build();
         editor.append(&title_list);
         editor.append(&details_heading);
-        editor.append(&details_frame);
+        editor.append(&details_scroller);
 
         let stack = gtk::Stack::builder()
             .transition_type(gtk::StackTransitionType::Crossfade)
@@ -179,6 +199,7 @@ impl TicketDialog {
             .build();
 
         Self {
+            this,
             board: Rc::downgrade(board),
             dialog,
             header,
@@ -237,11 +258,15 @@ impl TicketDialog {
             move |_| this.update_editor_state()
         ));
         // libadwaita builds the close button's container lazily, so set its cursor once shown.
-        self.dialog.connect_map(|dialog| set_pointer_on_window_controls(dialog.upcast_ref()));
+        self.dialog
+            .connect_map(|dialog| set_pointer_on_window_controls(dialog.upcast_ref()));
         self.dialog.connect_close_attempt(clone!(
             #[weak]
             this,
-            move |_| this.confirm_discard()
+            move |dialog| {
+                let dialog = dialog.clone();
+                this.confirm_discard(move || dialog.force_close());
+            }
         ));
 
         let shortcuts = gtk::ShortcutController::new();
@@ -275,6 +300,16 @@ impl TicketDialog {
                 }
             ))),
         ));
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("Escape"),
+            Some(gtk::CallbackAction::new(clone!(
+                #[weak]
+                this,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, _| this.escape()
+            ))),
+        ));
         self.dialog.add_controller(shortcuts);
 
         // Every other handler holds a weak reference; this one keeps the dialog state alive
@@ -290,14 +325,10 @@ impl TicketDialog {
     }
 
     fn show_preview(&self, ticket: &Ticket) {
-        self.dialog.set_title(&format!("#{} · {}", ticket.id, ticket.status.label()));
+        self.dialog
+            .set_title(&format!("#{} · {}", ticket.id, ticket.status.label()));
         self.title_label.set_label(&ticket.title);
-        self.meta_label.set_label(&format!(
-            "{} · Created {} · Updated {}",
-            ticket.status.label(),
-            format_time(ticket.created_at),
-            format_time(ticket.updated_at),
-        ));
+        self.meta_label.set_label(&meta_text(ticket));
         while let Some(child) = self.details.first_child() {
             self.details.remove(&child);
         }
@@ -309,7 +340,14 @@ impl TicketDialog {
                 .build();
             self.details.append(&empty);
         } else {
-            self.details.append(&markdown_view::build(&ticket.details));
+            let this = self.this.clone();
+            let on_task_toggled = Rc::new(move |marker: &Range<usize>, checked: bool| {
+                if let Some(this) = this.upgrade() {
+                    this.set_task(marker, checked);
+                }
+            });
+            self.details
+                .append(&markdown_view::build(&ticket.details, on_task_toggled));
         }
 
         self.stack.set_visible_child_name("preview");
@@ -319,7 +357,35 @@ impl TicketDialog {
         self.delete_button.set_visible(true);
         self.cancel_button.set_visible(false);
         self.save_button.set_visible(false);
+        // Move focus off the editor fields being hidden, but keep it inside the dialog so
+        // keys like Escape still reach it.
+        self.edit_button.grab_focus();
         self.dialog.set_can_close(true);
+    }
+
+    /// Saves a checkbox clicked in the preview by rewriting its marker in the details.
+    fn set_task(&self, marker: &Range<usize>, checked: bool) {
+        let (Some(board), Some(ticket)) = (self.board.upgrade(), self.ticket.borrow().clone())
+        else {
+            return;
+        };
+        let details = markdown::set_task(&ticket.details, marker, checked);
+        match board.update_ticket(ticket.id, &ticket.title, &details) {
+            Ok(updated) => {
+                self.meta_label.set_label(&meta_text(&updated));
+                *self.ticket.borrow_mut() = Some(updated);
+            }
+            Err(e) => {
+                pointer::add_toast(&self.toasts, &format!("Could not update task: {e}"));
+                // Re-render from the stored ticket so the checkbox shows the saved state.
+                let this = self.this.clone();
+                glib::idle_add_local_once(move || {
+                    if let Some(this) = this.upgrade() {
+                        this.show_preview(&ticket);
+                    }
+                });
+            }
+        }
     }
 
     fn show_editor(&self) {
@@ -365,7 +431,8 @@ impl TicketDialog {
         }
         let (title, _) = self.edited_content();
         let dirty = self.is_dirty();
-        self.save_button.set_sensitive(!title.trim().is_empty() && dirty);
+        self.save_button
+            .set_sensitive(!title.trim().is_empty() && dirty);
         // Closing with unsaved edits goes through `close-attempt` for confirmation.
         self.dialog.set_can_close(!dirty);
     }
@@ -394,8 +461,35 @@ impl TicketDialog {
                 self.dialog.set_can_close(true);
                 self.dialog.close();
             }
-            Err(e) => self.toasts.add_toast(adw::Toast::new(&format!("Could not save: {e}"))),
+            Err(e) => pointer::add_toast(&self.toasts, &format!("Could not save: {e}")),
         }
+    }
+
+    /// Escape while editing a saved ticket returns to its preview instead of closing the
+    /// dialog. Anywhere else it falls through to the default close.
+    fn escape(&self) -> glib::Propagation {
+        if !self.is_editing() {
+            return glib::Propagation::Proceed;
+        }
+        let Some(ticket) = self.ticket.borrow().clone() else {
+            return glib::Propagation::Proceed;
+        };
+        if self.is_dirty() {
+            let this = self.this.clone();
+            self.confirm_discard(move || {
+                // After the alert closes and hands focus back to the editor, so that
+                // `show_preview` moves it last.
+                let (this, ticket) = (this.clone(), ticket.clone());
+                glib::idle_add_local_once(move || {
+                    if let Some(this) = this.upgrade() {
+                        this.show_preview(&ticket);
+                    }
+                });
+            });
+        } else {
+            self.show_preview(&ticket);
+        }
+        glib::Propagation::Stop
     }
 
     fn cancel(&self) {
@@ -414,24 +508,31 @@ impl TicketDialog {
         };
         let alert = adw::AlertDialog::new(
             Some("Delete ticket?"),
-            Some(&format!("“{}” will be permanently deleted. This cannot be undone.", ticket.title)),
+            Some(&format!(
+                "“{}” will be permanently deleted. This cannot be undone.",
+                ticket.title
+            )),
         );
         alert.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
         alert.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
         alert.set_default_response(Some("cancel"));
         alert.set_close_response("cancel");
+        alert.connect_map(|alert| pointer::set_on_buttons(alert.upcast_ref()));
         let this = Rc::clone(self);
         // Check the id rather than connecting to the "delete" detail only, so no other
         // response can ever trigger the deletion.
-        alert.connect_response(None, clone!(
-            #[weak]
-            this,
-            move |_, response| {
-                if response == "delete" {
-                    this.delete(ticket.id);
+        alert.connect_response(
+            None,
+            clone!(
+                #[weak]
+                this,
+                move |_, response| {
+                    if response == "delete" {
+                        this.delete(ticket.id);
+                    }
                 }
-            }
-        ));
+            ),
+        );
         alert.present(Some(&self.dialog));
     }
 
@@ -444,11 +545,11 @@ impl TicketDialog {
                 self.dialog.force_close();
                 board.toast("Ticket deleted");
             }
-            Err(e) => self.toasts.add_toast(adw::Toast::new(&format!("Could not delete: {e}"))),
+            Err(e) => pointer::add_toast(&self.toasts, &format!("Could not delete: {e}")),
         }
     }
 
-    fn confirm_discard(&self) {
+    fn confirm_discard(&self, on_discard: impl Fn() + 'static) {
         let alert = adw::AlertDialog::new(
             Some("Discard changes?"),
             Some("Your edits to this ticket have not been saved."),
@@ -457,10 +558,10 @@ impl TicketDialog {
         alert.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
         alert.set_default_response(Some("keep"));
         alert.set_close_response("keep");
-        let dialog = self.dialog.clone();
+        alert.connect_map(|alert| pointer::set_on_buttons(alert.upcast_ref()));
         alert.connect_response(None, move |_, response| {
             if response == "discard" {
-                dialog.force_close();
+                on_discard();
             }
         });
         alert.present(Some(&self.dialog));
@@ -530,6 +631,63 @@ fn set_pointer_on_window_controls(widget: &gtk::Widget) {
     }
 }
 
+/// Makes Tab insert two spaces (replacing any selection) instead of a tab character.
+fn indent_with_spaces(view: &gtk::TextView) {
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    keys.connect_key_pressed(clone!(
+        #[weak]
+        view,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |_, key, _, modifiers| {
+            let chorded = modifiers.intersects(
+                gdk::ModifierType::CONTROL_MASK
+                    | gdk::ModifierType::ALT_MASK
+                    | gdk::ModifierType::SHIFT_MASK
+                    | gdk::ModifierType::SUPER_MASK,
+            );
+            if key != gdk::Key::Tab || chorded || !view.is_editable() {
+                return glib::Propagation::Proceed;
+            }
+            let buffer = view.buffer();
+            buffer.begin_user_action();
+            buffer.delete_selection(true, true);
+            buffer.insert_interactive_at_cursor(INDENT, true);
+            buffer.end_user_action();
+            view.scroll_mark_onscreen(&buffer.get_insert());
+            glib::Propagation::Stop
+        }
+    ));
+    view.add_controller(keys);
+}
+
+/// What Tab inserts in the details editor.
+const INDENT: &str = "  ";
+
+/// Width of a tab in the details editor, in characters.
+const TAB_WIDTH_CHARS: usize = 2;
+
+fn set_tab_width(view: &gtk::TextView, chars: usize) {
+    let (width, _) = view
+        .create_pango_layout(Some(&" ".repeat(chars)))
+        .pixel_size();
+    let mut tabs = gtk::pango::TabArray::new(1, true);
+    tabs.set_tab(0, gtk::pango::TabAlign::Left, width);
+    view.set_tabs(&tabs);
+}
+
+fn meta_text(ticket: &Ticket) -> String {
+    format!(
+        "{} · Created {} · Updated {}",
+        ticket.status.label(),
+        format_time(ticket.created_at),
+        format_time(ticket.updated_at),
+    )
+}
+
 fn format_time(time: DateTime<Utc>) -> String {
-    time.with_timezone(&Local).format("%b %-d, %Y %H:%M").to_string()
+    time.with_timezone(&Local)
+        .format("%b %-d, %Y %H:%M")
+        .to_string()
 }

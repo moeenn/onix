@@ -1,5 +1,7 @@
+mod code_spans;
 mod dialog;
 mod markdown_view;
+mod pointer;
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
@@ -283,7 +285,7 @@ impl Board {
     }
 
     pub fn toast(&self, message: &str) {
-        self.toasts.add_toast(adw::Toast::new(message));
+        pointer::add_toast(&self.toasts, message);
     }
 
     /// Reloads every column from the database.
