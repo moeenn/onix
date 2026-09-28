@@ -1,0 +1,534 @@
+//! Modal for viewing, editing and creating tickets.
+
+use std::cell::RefCell;
+use std::rc::{Rc, Weak};
+
+use adw::prelude::*;
+use chrono::{DateTime, Local, Utc};
+use gtk::glib::{self, clone};
+
+use super::Board;
+use crate::markdown;
+use crate::model::{Status, Ticket};
+
+pub enum Target {
+    /// Create a ticket at the top of this column.
+    New(Status),
+    Existing(Ticket),
+}
+
+struct TicketDialog {
+    board: Weak<Board>,
+    dialog: adw::Dialog,
+    header: adw::HeaderBar,
+    edit_button: gtk::Button,
+    delete_button: gtk::Button,
+    cancel_button: gtk::Button,
+    save_button: gtk::Button,
+    stack: gtk::Stack,
+    toasts: adw::ToastOverlay,
+    title_label: gtk::Label,
+    meta_label: gtk::Label,
+    details_label: gtk::Label,
+    title_row: adw::EntryRow,
+    details_buffer: gtk::TextBuffer,
+    /// Column a new ticket is created in.
+    status: Status,
+    /// `None` until a new ticket has been saved.
+    ticket: RefCell<Option<Ticket>>,
+}
+
+pub fn open(board: &Rc<Board>, target: Target) {
+    let (status, ticket) = match target {
+        Target::New(status) => (status, None),
+        Target::Existing(ticket) => (ticket.status, Some(ticket)),
+    };
+    let this = Rc::new(TicketDialog::new(board, status, ticket.clone()));
+    this.connect_signals();
+    match &ticket {
+        Some(ticket) => this.show_preview(ticket),
+        None => this.show_editor(),
+    }
+    this.dialog.present(Some(board.window()));
+}
+
+impl TicketDialog {
+    fn new(board: &Rc<Board>, status: Status, ticket: Option<Ticket>) -> Self {
+        let edit_button = gtk::Button::builder()
+            .label("Edit")
+            .tooltip_text("Edit (Ctrl+E)")
+            .build();
+        let delete_button = gtk::Button::builder()
+            .label("Delete")
+            .tooltip_text("Delete ticket")
+            .css_classes(["destructive-action"])
+            .build();
+        let cancel_button = gtk::Button::with_label("Cancel");
+        let save_button = gtk::Button::builder()
+            .label("Save")
+            .tooltip_text("Save (Ctrl+S)")
+            .css_classes(["suggested-action"])
+            .build();
+        let header = adw::HeaderBar::new();
+        header.pack_start(&cancel_button);
+        header.pack_start(&delete_button);
+        header.pack_end(&edit_button);
+        header.pack_end(&save_button);
+        for button in [&edit_button, &delete_button, &cancel_button, &save_button] {
+            button.set_cursor_from_name(Some("pointer"));
+        }
+
+        // Preview
+        let title_label = gtk::Label::builder()
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .xalign(0.0)
+            .selectable(true)
+            .css_classes(["title-2"])
+            .build();
+        let meta_label = gtk::Label::builder()
+            .wrap(true)
+            .xalign(0.0)
+            .css_classes(["dim-label", "caption"])
+            .build();
+        let details_label = gtk::Label::builder()
+            .use_markup(true)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .xalign(0.0)
+            .yalign(0.0)
+            .selectable(true)
+            .css_classes(["ticket-preview"])
+            .build();
+        let preview_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .margin_start(24)
+            .margin_end(24)
+            .margin_top(12)
+            .margin_bottom(24)
+            .build();
+        preview_box.append(&title_label);
+        preview_box.append(&meta_label);
+        preview_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        preview_box.append(&details_label);
+        let preview = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&preview_box)
+            .build();
+
+        // Editor
+        let title_row = adw::EntryRow::builder().title("Title").build();
+        let title_list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .css_classes(["boxed-list"])
+            .build();
+        title_list.append(&title_row);
+        if let Some(text) = title_row.delegate().and_then(|d| d.downcast::<gtk::Text>().ok()) {
+            trim_pasted_text_in_entry(&text);
+        }
+        let details_heading = gtk::Label::builder()
+            .label("Details (Markdown)")
+            .xalign(0.0)
+            .css_classes(["heading"])
+            .build();
+        let details_view = gtk::TextView::builder()
+            .monospace(true)
+            .wrap_mode(gtk::WrapMode::WordChar)
+            .top_margin(12)
+            .bottom_margin(12)
+            .left_margin(12)
+            .right_margin(12)
+            // Extra space between lines, and between wrapped rows of one line.
+            .pixels_below_lines(4)
+            .pixels_inside_wrap(2)
+            .accepts_tab(false)
+            .css_classes(["ticket-editor"])
+            .build();
+        let details_buffer = details_view.buffer();
+        trim_pasted_text_in_view(&details_view);
+        let details_scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .child(&details_view)
+            .build();
+        let details_frame = gtk::Frame::builder().child(&details_scroller).build();
+        let editor = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .margin_start(18)
+            .margin_end(18)
+            .margin_top(12)
+            .margin_bottom(18)
+            .build();
+        editor.append(&title_list);
+        editor.append(&details_heading);
+        editor.append(&details_frame);
+
+        let stack = gtk::Stack::builder()
+            .transition_type(gtk::StackTransitionType::Crossfade)
+            .build();
+        stack.add_named(&preview, Some("preview"));
+        stack.add_named(&editor, Some("edit"));
+
+        let toasts = adw::ToastOverlay::new();
+        toasts.set_child(Some(&stack));
+        let toolbar = adw::ToolbarView::new();
+        toolbar.add_top_bar(&header);
+        toolbar.set_content(Some(&toasts));
+
+        let dialog = adw::Dialog::builder()
+            .content_width(760)
+            .content_height(640)
+            .child(&toolbar)
+            .build();
+
+        Self {
+            board: Rc::downgrade(board),
+            dialog,
+            header,
+            edit_button,
+            delete_button,
+            cancel_button,
+            save_button,
+            stack,
+            toasts,
+            title_label,
+            meta_label,
+            details_label,
+            title_row,
+            details_buffer,
+            status,
+            ticket: RefCell::new(ticket),
+        }
+    }
+
+    fn connect_signals(self: &Rc<Self>) {
+        let this = Rc::clone(self);
+
+        self.edit_button.connect_clicked(clone!(
+            #[weak]
+            this,
+            move |_| this.show_editor()
+        ));
+        self.save_button.connect_clicked(clone!(
+            #[weak]
+            this,
+            move |_| this.save()
+        ));
+        self.delete_button.connect_clicked(clone!(
+            #[weak]
+            this,
+            move |_| this.confirm_delete()
+        ));
+        self.cancel_button.connect_clicked(clone!(
+            #[weak]
+            this,
+            move |_| this.cancel()
+        ));
+        self.title_row.connect_changed(clone!(
+            #[weak]
+            this,
+            move |_| this.update_editor_state()
+        ));
+        self.title_row.connect_entry_activated(clone!(
+            #[weak]
+            this,
+            move |_| this.save()
+        ));
+        self.details_buffer.connect_changed(clone!(
+            #[weak]
+            this,
+            move |_| this.update_editor_state()
+        ));
+        // libadwaita builds the close button's container lazily, so set its cursor once shown.
+        self.dialog.connect_map(|dialog| set_pointer_on_window_controls(dialog.upcast_ref()));
+        self.dialog.connect_close_attempt(clone!(
+            #[weak]
+            this,
+            move |_| this.confirm_discard()
+        ));
+
+        let shortcuts = gtk::ShortcutController::new();
+        shortcuts.set_propagation_phase(gtk::PropagationPhase::Capture);
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("<Control>s|<Control>Return"),
+            Some(gtk::CallbackAction::new(clone!(
+                #[weak]
+                this,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, _| {
+                    this.save();
+                    glib::Propagation::Stop
+                }
+            ))),
+        ));
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("<Control>e"),
+            Some(gtk::CallbackAction::new(clone!(
+                #[weak]
+                this,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, _| {
+                    if this.is_editing() {
+                        return glib::Propagation::Proceed;
+                    }
+                    this.show_editor();
+                    glib::Propagation::Stop
+                }
+            ))),
+        ));
+        self.dialog.add_controller(shortcuts);
+
+        // Every other handler holds a weak reference; this one keeps the dialog state alive
+        // until the dialog closes.
+        let keep_alive = RefCell::new(Some(this));
+        self.dialog.connect_closed(move |_| {
+            keep_alive.take();
+        });
+    }
+
+    fn is_editing(&self) -> bool {
+        self.stack.visible_child_name().as_deref() == Some("edit")
+    }
+
+    fn show_preview(&self, ticket: &Ticket) {
+        self.dialog.set_title(&format!("#{} · {}", ticket.id, ticket.status.label()));
+        self.title_label.set_label(&ticket.title);
+        self.meta_label.set_label(&format!(
+            "{} · Created {} · Updated {}",
+            ticket.status.label(),
+            format_time(ticket.created_at),
+            format_time(ticket.updated_at),
+        ));
+        if ticket.details.trim().is_empty() {
+            self.details_label.set_markup("<i>No details.</i>");
+            self.details_label.add_css_class("dim-label");
+        } else {
+            self.details_label.set_markup(&markdown::to_pango(&ticket.details));
+            self.details_label.remove_css_class("dim-label");
+        }
+
+        self.stack.set_visible_child_name("preview");
+        self.header.set_show_end_title_buttons(true);
+        set_pointer_on_window_controls(self.header.upcast_ref());
+        self.edit_button.set_visible(true);
+        self.delete_button.set_visible(true);
+        self.cancel_button.set_visible(false);
+        self.save_button.set_visible(false);
+        self.dialog.set_can_close(true);
+    }
+
+    fn show_editor(&self) {
+        let (title, details) = self.original_content();
+        self.dialog.set_title(&match &*self.ticket.borrow() {
+            Some(ticket) => format!("Edit #{}", ticket.id),
+            None => format!("New {} Ticket", self.status.label()),
+        });
+
+        self.stack.set_visible_child_name("edit");
+        self.title_row.set_text(&title);
+        self.details_buffer.set_text(&details);
+        self.header.set_show_end_title_buttons(false);
+        self.edit_button.set_visible(false);
+        self.delete_button.set_visible(false);
+        self.cancel_button.set_visible(true);
+        self.save_button.set_visible(true);
+        self.update_editor_state();
+        self.title_row.grab_focus();
+    }
+
+    fn original_content(&self) -> (String, String) {
+        self.ticket
+            .borrow()
+            .as_ref()
+            .map(|t| (t.title.clone(), t.details.clone()))
+            .unwrap_or_default()
+    }
+
+    fn edited_content(&self) -> (String, String) {
+        let buffer = &self.details_buffer;
+        let details = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+        (self.title_row.text().to_string(), details.to_string())
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.is_editing() && self.edited_content() != self.original_content()
+    }
+
+    fn update_editor_state(&self) {
+        if !self.is_editing() {
+            return;
+        }
+        let (title, _) = self.edited_content();
+        let dirty = self.is_dirty();
+        self.save_button.set_sensitive(!title.trim().is_empty() && dirty);
+        // Closing with unsaved edits goes through `close-attempt` for confirmation.
+        self.dialog.set_can_close(!dirty);
+    }
+
+    fn save(&self) {
+        if !self.is_editing() || !self.save_button.is_sensitive() {
+            return;
+        }
+        let Some(board) = self.board.upgrade() else {
+            return;
+        };
+        let (title, details) = self.edited_content();
+        let title = title.trim();
+        let existing = self.ticket.borrow().as_ref().map(|t| t.id);
+
+        let result = match existing {
+            Some(id) => board.update_ticket(id, title, &details),
+            None => board.create_ticket(self.status, title, &details),
+        };
+        match result {
+            Ok(ticket) if existing.is_some() => {
+                self.show_preview(&ticket);
+                *self.ticket.borrow_mut() = Some(ticket);
+            }
+            Ok(_) => {
+                self.dialog.set_can_close(true);
+                self.dialog.close();
+            }
+            Err(e) => self.toasts.add_toast(adw::Toast::new(&format!("Could not save: {e}"))),
+        }
+    }
+
+    fn cancel(&self) {
+        let ticket = self.ticket.borrow().clone();
+        match ticket {
+            Some(ticket) => self.show_preview(&ticket),
+            None => {
+                self.dialog.close();
+            }
+        }
+    }
+
+    fn confirm_delete(self: &Rc<Self>) {
+        let Some(ticket) = self.ticket.borrow().clone() else {
+            return;
+        };
+        let alert = adw::AlertDialog::new(
+            Some("Delete ticket?"),
+            Some(&format!("“{}” will be permanently deleted. This cannot be undone.", ticket.title)),
+        );
+        alert.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
+        alert.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        alert.set_default_response(Some("cancel"));
+        alert.set_close_response("cancel");
+        let this = Rc::clone(self);
+        // Check the id rather than connecting to the "delete" detail only, so no other
+        // response can ever trigger the deletion.
+        alert.connect_response(None, clone!(
+            #[weak]
+            this,
+            move |_, response| {
+                if response == "delete" {
+                    this.delete(ticket.id);
+                }
+            }
+        ));
+        alert.present(Some(&self.dialog));
+    }
+
+    fn delete(&self, id: i64) {
+        let Some(board) = self.board.upgrade() else {
+            return;
+        };
+        match board.delete_ticket(id) {
+            Ok(()) => {
+                self.dialog.force_close();
+                board.toast("Ticket deleted");
+            }
+            Err(e) => self.toasts.add_toast(adw::Toast::new(&format!("Could not delete: {e}"))),
+        }
+    }
+
+    fn confirm_discard(&self) {
+        let alert = adw::AlertDialog::new(
+            Some("Discard changes?"),
+            Some("Your edits to this ticket have not been saved."),
+        );
+        alert.add_responses(&[("keep", "Keep Editing"), ("discard", "Discard")]);
+        alert.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+        alert.set_default_response(Some("keep"));
+        alert.set_close_response("keep");
+        let dialog = self.dialog.clone();
+        alert.connect_response(None, move |_, response| {
+            if response == "discard" {
+                dialog.force_close();
+            }
+        });
+        alert.present(Some(&self.dialog));
+    }
+}
+
+/// Replaces the default paste in a single-line entry with one that trims the pasted text.
+fn trim_pasted_text_in_entry(text: &gtk::Text) {
+    text.connect_paste_clipboard(|text| {
+        text.stop_signal_emission_by_name("paste-clipboard");
+        let clipboard = text.clipboard();
+        glib::spawn_future_local(clone!(
+            #[weak]
+            text,
+            async move {
+                let Ok(Some(pasted)) = clipboard.read_text_future().await else {
+                    return;
+                };
+                if !text.is_editable() {
+                    return;
+                }
+                text.delete_selection();
+                let mut position = text.position();
+                text.insert_text(pasted.trim(), &mut position);
+                text.set_position(position);
+            }
+        ));
+    });
+}
+
+/// Replaces the default paste in a text view with one that trims the pasted text.
+fn trim_pasted_text_in_view(view: &gtk::TextView) {
+    view.connect_paste_clipboard(|view| {
+        view.stop_signal_emission_by_name("paste-clipboard");
+        let clipboard = view.clipboard();
+        glib::spawn_future_local(clone!(
+            #[weak]
+            view,
+            async move {
+                let Ok(Some(pasted)) = clipboard.read_text_future().await else {
+                    return;
+                };
+                let buffer = view.buffer();
+                let editable = view.is_editable();
+                // One undo step for replacing the selection with the pasted text.
+                buffer.begin_user_action();
+                buffer.delete_selection(true, editable);
+                buffer.insert_interactive_at_cursor(pasted.trim(), editable);
+                buffer.end_user_action();
+                view.scroll_mark_onscreen(&buffer.get_insert());
+            }
+        ));
+    });
+}
+
+/// Gives the header bar's built-in close button a pointer cursor. The button is created
+/// inside libadwaita, so it is found through its `windowcontrols` container.
+fn set_pointer_on_window_controls(widget: &gtk::Widget) {
+    if widget.css_name() == "windowcontrols" {
+        widget.set_cursor_from_name(Some("pointer"));
+        return;
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        set_pointer_on_window_controls(&current);
+        child = current.next_sibling();
+    }
+}
+
+fn format_time(time: DateTime<Utc>) -> String {
+    time.with_timezone(&Local).format("%b %-d, %Y %H:%M").to_string()
+}

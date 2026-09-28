@@ -1,0 +1,86 @@
+/* Tighter corners than stock libadwaita (9–18px). Only `--window-radius` is a variable;
+   the rest are fixed in the theme, so the widgets this app uses are overridden directly. */
+:root {
+  --window-radius: 8px;
+}
+
+button,
+entry,
+spinbutton,
+toast {
+  border-radius: 5px;
+}
+
+.card,
+frame,
+list.boxed-list,
+list.boxed-list > row,
+popover > contents {
+  border-radius: 6px;
+}
+
+floating-sheet > sheet,
+dialog-host > dialog.alert sheet {
+  border-radius: 8px;
+}
+
+dialog.alert .response-area > button {
+  border-radius: 5px;
+}
+
+.board-column {
+  background-color: alpha(currentColor, 0.04);
+  border-radius: 6px;
+}
+
+.board-column:drop(active) {
+  background-color: alpha(@accent_bg_color, 0.12);
+  box-shadow: none;
+}
+
+.column-header {
+  padding: 8px 8px 6px 14px;
+}
+
+.add-ticket {
+  padding: 6px 12px;
+  border: 1px dashed alpha(currentColor, 0.25);
+  background: none;
+  font-weight: normal;
+}
+
+.add-ticket:hover {
+  background-color: alpha(currentColor, 0.07);
+}
+
+.ticket {
+  padding: 10px 12px;
+}
+
+.ticket-title {
+  text-shadow: 0 1px 2px alpha(black, 0.3);
+}
+
+.ticket.dragging {
+  opacity: 0.35;
+}
+
+/* Insertion marker shown in the gap above/below the card under the pointer. */
+.ticket.drop-above {
+  box-shadow: 0 -6px 0 -2px @accent_bg_color;
+}
+
+.ticket.drop-below {
+  box-shadow: 0 6px 0 -2px @accent_bg_color;
+}
+
+.ticket-editor {
+  font-family: monospace;
+  font-size: 11.5pt;
+  line-height: 1.45;
+}
+
+.ticket-preview {
+  font-size: 12.5pt;
+  line-height: 1.4;
+}
