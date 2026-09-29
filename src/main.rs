@@ -9,7 +9,7 @@ use adw::prelude::*;
 use clap::Parser;
 use gtk::{gio, glib};
 
-/// Kanban boards for projects and their tickets, stored in `~/.config/orgx/data.db`.
+/// Kanban boards for projects and their tickets, stored in `~/.config/onix/data.db`.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {}
@@ -27,7 +27,7 @@ fn main() -> glib::ExitCode {
     };
 
     let app = adw::Application::builder()
-        .application_id("dev.orgx.Orgx")
+        .application_id("dev.onix.Onix")
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
 

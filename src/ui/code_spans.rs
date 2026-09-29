@@ -28,7 +28,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for CodeSpans {
-        const NAME: &'static str = "OrgxCodeSpans";
+        const NAME: &'static str = "OnixCodeSpans";
         type Type = super::CodeSpans;
         type ParentType = gtk::Widget;
 

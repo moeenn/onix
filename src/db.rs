@@ -8,7 +8,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, ffi, params};
 
 use crate::model::{Project, Status, Ticket};
 
-/// Stored in the SQLite header so orgx databases can be told apart from others ("ORGX").
+/// Stored in the SQLite header so onix databases can be told apart from others ("ONIX").
 const APPLICATION_ID: i32 = 0x4F52_4758;
 /// 1 and 2 were single-board `project.db` files; 3 is `data.db` with multiple projects;
 /// 4 makes the names of projects that aren't deleted unique.
@@ -67,7 +67,7 @@ const TICKET_COLUMNS: &[Column] = &[
 pub enum Error {
     Io(io::Error),
     Sqlite(rusqlite::Error),
-    /// The file exists but is not a usable orgx database.
+    /// The file exists but is not a usable onix database.
     Invalid(String),
     NotFound(i64),
     ProjectNotFound(i64),
@@ -80,7 +80,7 @@ impl fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "{e}"),
             Error::Sqlite(e) => write!(f, "database error: {e}"),
-            Error::Invalid(reason) => write!(f, "not a valid orgx database: {reason}"),
+            Error::Invalid(reason) => write!(f, "not a valid onix database: {reason}"),
             Error::NotFound(id) => write!(f, "ticket #{id} no longer exists"),
             Error::ProjectNotFound(id) => write!(f, "project #{id} no longer exists"),
             Error::DuplicateProjectName(name) => {
@@ -120,9 +120,9 @@ impl FromSql for Status {
     }
 }
 
-/// `$XDG_CONFIG_HOME/orgx/data.db`, normally `~/.config/orgx/data.db`.
+/// `$XDG_CONFIG_HOME/onix/data.db`, normally `~/.config/onix/data.db`.
 pub fn default_path() -> PathBuf {
-    gtk::glib::user_config_dir().join("orgx").join("data.db")
+    gtk::glib::user_config_dir().join("onix").join("data.db")
 }
 
 const TICKET_SELECT: &str =
@@ -512,7 +512,7 @@ fn validate(conn: &Connection) -> Result<()> {
         .pragma_query_value(None, "application_id", |r| r.get(0))
         .map_err(|e| Error::Invalid(format!("file is not a SQLite database ({e})")))?;
     if application_id != APPLICATION_ID {
-        return Err(Error::Invalid("SQLite file was not created by orgx".into()));
+        return Err(Error::Invalid("SQLite file was not created by onix".into()));
     }
 
     let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -613,16 +613,16 @@ mod tests {
     use super::*;
 
     fn temp_path(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("orgx-test-{}-{name}.db", std::process::id()));
+        let path = std::env::temp_dir().join(format!("onix-test-{}-{name}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         path
     }
 
     #[test]
     fn creates_nested_directory_and_reopens() {
-        let dir = std::env::temp_dir().join(format!("orgx-test-{}-dir", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("onix-test-{}-dir", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("orgx").join("data.db");
+        let path = dir.join("onix").join("data.db");
 
         let mut store = Store::open(&path).unwrap();
         assert!(store.list_projects().unwrap().is_empty(), "starts empty");

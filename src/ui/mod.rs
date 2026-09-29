@@ -71,7 +71,7 @@ impl Shell {
     fn new(app: &adw::Application, store: Store) -> Rc<Self> {
         let window = adw::ApplicationWindow::builder()
             .application(app)
-            .title("orgx")
+            .title("Onix")
             .default_width(1100)
             .default_height(700)
             .width_request(600)
@@ -100,7 +100,7 @@ impl Shell {
         let sidebar_page = adw::ToolbarView::new();
         sidebar_page.add_top_bar(
             &adw::HeaderBar::builder()
-                .title_widget(&adw::WindowTitle::new("orgx", ""))
+                .title_widget(&adw::WindowTitle::new("Onix", ""))
                 .build(),
         );
         sidebar_page.set_content(Some(&sidebar_scroller));
