@@ -46,6 +46,12 @@ impl Status {
 }
 
 #[derive(Clone, Debug)]
+pub struct Project {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct Ticket {
     pub id: i64,
     pub title: String,

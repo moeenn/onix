@@ -9,7 +9,8 @@ use chrono::{DateTime, Local, Utc};
 use gtk::gdk;
 use gtk::glib::{self, clone};
 
-use super::{Board, markdown_view, pointer};
+use super::board::Board;
+use super::{markdown_view, pointer};
 use crate::markdown;
 use crate::model::{Status, Ticket};
 
@@ -259,7 +260,7 @@ impl TicketDialog {
         ));
         // libadwaita builds the close button's container lazily, so set its cursor once shown.
         self.dialog
-            .connect_map(|dialog| set_pointer_on_window_controls(dialog.upcast_ref()));
+            .connect_map(|dialog| pointer::set_on_window_controls(dialog.upcast_ref()));
         self.dialog.connect_close_attempt(clone!(
             #[weak]
             this,
@@ -352,7 +353,7 @@ impl TicketDialog {
 
         self.stack.set_visible_child_name("preview");
         self.header.set_show_end_title_buttons(true);
-        set_pointer_on_window_controls(self.header.upcast_ref());
+        pointer::set_on_window_controls(self.header.upcast_ref());
         self.edit_button.set_visible(true);
         self.delete_button.set_visible(true);
         self.cancel_button.set_visible(false);
@@ -465,14 +466,16 @@ impl TicketDialog {
         }
     }
 
-    /// Escape while editing a saved ticket returns to its preview instead of closing the
-    /// dialog. Anywhere else it falls through to the default close.
+    /// Escape while editing a saved ticket returns to its preview, and while editing a new
+    /// one closes the dialog (confirming if anything was typed). In the preview it falls
+    /// through to the default close.
     fn escape(&self) -> glib::Propagation {
         if !self.is_editing() {
             return glib::Propagation::Proceed;
         }
         let Some(ticket) = self.ticket.borrow().clone() else {
-            return glib::Propagation::Proceed;
+            self.leave_new_ticket();
+            return glib::Propagation::Stop;
         };
         if self.is_dirty() {
             let this = self.this.clone();
@@ -496,9 +499,17 @@ impl TicketDialog {
         let ticket = self.ticket.borrow().clone();
         match ticket {
             Some(ticket) => self.show_preview(&ticket),
-            None => {
-                self.dialog.close();
-            }
+            None => self.leave_new_ticket(),
+        }
+    }
+
+    /// Closes the editor of a ticket that was never saved, asking first if anything was typed.
+    fn leave_new_ticket(&self) {
+        if self.is_dirty() {
+            let dialog = self.dialog.clone();
+            self.confirm_discard(move || dialog.force_close());
+        } else {
+            self.dialog.force_close();
         }
     }
 
@@ -509,7 +520,7 @@ impl TicketDialog {
         let alert = adw::AlertDialog::new(
             Some("Delete ticket?"),
             Some(&format!(
-                "“{}” will be permanently deleted. This cannot be undone.",
+                "“{}” will be removed from the board.",
                 ticket.title
             )),
         );
@@ -617,20 +628,6 @@ fn trim_pasted_text_in_view(view: &gtk::TextView) {
     });
 }
 
-/// Gives the header bar's built-in close button a pointer cursor. The button is created
-/// inside libadwaita, so it is found through its `windowcontrols` container.
-fn set_pointer_on_window_controls(widget: &gtk::Widget) {
-    if widget.css_name() == "windowcontrols" {
-        widget.set_cursor_from_name(Some("pointer"));
-        return;
-    }
-    let mut child = widget.first_child();
-    while let Some(current) = child {
-        set_pointer_on_window_controls(&current);
-        child = current.next_sibling();
-    }
-}
-
 /// Makes Tab insert two spaces (replacing any selection) instead of a tab character.
 fn indent_with_spaces(view: &gtk::TextView) {
     let keys = gtk::EventControllerKey::new();
@@ -686,7 +683,7 @@ fn meta_text(ticket: &Ticket) -> String {
     )
 }
 
-fn format_time(time: DateTime<Utc>) -> String {
+pub fn format_time(time: DateTime<Utc>) -> String {
     time.with_timezone(&Local)
         .format("%b %-d, %Y %H:%M")
         .to_string()

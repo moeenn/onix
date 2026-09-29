@@ -4,26 +4,24 @@ mod model;
 mod ui;
 
 use std::cell::RefCell;
-use std::path::PathBuf;
 
 use adw::prelude::*;
 use clap::Parser;
 use gtk::{gio, glib};
 
+/// Kanban boards for projects and their tickets, stored in `~/.config/orgx/data.db`.
 #[derive(Parser)]
 #[command(version, about)]
-struct Cli {
-    #[arg(short, long, value_name = "PATH", default_value = "./project.db")]
-    project: PathBuf,
-}
+struct Cli {}
 
 fn main() -> glib::ExitCode {
-    let cli = Cli::parse();
+    Cli::parse();
 
-    let store = match db::Store::open(&cli.project) {
+    let path = db::default_path();
+    let store = match db::Store::open(&path) {
         Ok(store) => store,
         Err(e) => {
-            eprintln!("error: {}: {e}", cli.project.display());
+            eprintln!("error: {}: {e}", path.display());
             return glib::ExitCode::FAILURE;
         }
     };
@@ -33,11 +31,10 @@ fn main() -> glib::ExitCode {
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
-    let store = RefCell::new(Some(store));
-    let path = cli.project;
+    let opened = RefCell::new(Some(store));
     app.connect_activate(move |app| {
-        if let Some(store) = store.take() {
-            ui::build(app, store, &path);
+        if let Some(store) = opened.take() {
+            ui::build(app, store);
         }
     });
 
