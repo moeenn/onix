@@ -6,13 +6,15 @@ use chrono::{DateTime, Utc};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, ffi, params};
 
-use crate::model::{Project, Status, Ticket};
+use crate::model::{Note, Project, Status, Ticket};
 
 /// Stored in the SQLite header so onix databases can be told apart from others ("ONIX").
 const APPLICATION_ID: i32 = 0x4F52_4758;
 /// 1 and 2 were single-board `project.db` files; 3 is `data.db` with multiple projects;
-/// 4 makes the names of projects that aren't deleted unique.
-const SCHEMA_VERSION: i32 = 4;
+/// 4 makes the names of projects that aren't deleted unique; 5 adds notes.
+const SCHEMA_VERSION: i32 = 5;
+/// The oldest version that can still be upgraded.
+const MIN_SCHEMA_VERSION: i32 = 3;
 
 /// Names are compared case-insensitively, so "Work" and "work" can't both exist. Deleted
 /// projects don't count, so a name can be reused after deleting its project.
@@ -42,6 +44,17 @@ CREATE TABLE tickets (
 CREATE INDEX tickets_project_status_position ON tickets (project_id, status, position);
 ";
 
+/// Added in version 5, so files from before it get it on open.
+const NOTES_SCHEMA: &str = "
+CREATE TABLE notes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    title      TEXT,
+    detail     TEXT    NOT NULL DEFAULT '',
+    updated_at TEXT    NOT NULL,
+    deleted_at TEXT
+);
+";
+
 /// (name, declared type, not null, primary key)
 type Column = (&'static str, &'static str, bool, bool);
 
@@ -63,6 +76,14 @@ const TICKET_COLUMNS: &[Column] = &[
     ("deleted_at", "TEXT", false, false),
 ];
 
+const NOTE_COLUMNS: &[Column] = &[
+    ("id", "INTEGER", false, true),
+    ("title", "TEXT", false, false),
+    ("detail", "TEXT", true, false),
+    ("updated_at", "TEXT", true, false),
+    ("deleted_at", "TEXT", false, false),
+];
+
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
@@ -71,6 +92,7 @@ pub enum Error {
     Invalid(String),
     NotFound(i64),
     ProjectNotFound(i64),
+    NoteNotFound(i64),
     /// Another project that isn't deleted already has this name.
     DuplicateProjectName(String),
 }
@@ -83,6 +105,7 @@ impl fmt::Display for Error {
             Error::Invalid(reason) => write!(f, "not a valid onix database: {reason}"),
             Error::NotFound(id) => write!(f, "ticket #{id} no longer exists"),
             Error::ProjectNotFound(id) => write!(f, "project #{id} no longer exists"),
+            Error::NoteNotFound(id) => write!(f, "note #{id} no longer exists"),
             Error::DuplicateProjectName(name) => {
                 write!(f, "a project named “{name}” already exists")
             }
@@ -128,6 +151,8 @@ pub fn default_path() -> PathBuf {
 const TICKET_SELECT: &str =
     "SELECT id, title, details, status, created_at, updated_at FROM tickets";
 
+const NOTE_SELECT: &str = "SELECT id, title, detail, updated_at FROM notes";
+
 pub struct Store {
     conn: Connection,
 }
@@ -169,6 +194,7 @@ impl Store {
             "BEGIN;
              {SCHEMA}
              {PROJECT_NAME_INDEX_SQL}
+             {NOTES_SCHEMA}
              PRAGMA application_id = {APPLICATION_ID};
              PRAGMA user_version = {SCHEMA_VERSION};
              COMMIT;"
@@ -182,6 +208,8 @@ impl Store {
         for project in self.list_projects().map_err(unreadable)? {
             self.list(project.id).map_err(unreadable)?;
         }
+        self.list_notes().map_err(unreadable)?;
+        self.list_deleted_notes().map_err(unreadable)?;
         Ok(())
     }
 
@@ -481,6 +509,96 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+
+    /// Notes that aren't deleted, most recently updated first.
+    pub fn list_notes(&self) -> Result<Vec<Note>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "{NOTE_SELECT} WHERE deleted_at IS NULL ORDER BY updated_at DESC, id DESC"
+        ))?;
+        let notes = stmt
+            .query_map([], note_from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(notes)
+    }
+
+    pub fn get_note(&self, id: i64) -> Result<Note> {
+        self.conn
+            .query_row(
+                &format!("{NOTE_SELECT} WHERE id = ?1 AND deleted_at IS NULL"),
+                [id],
+                note_from_row,
+            )
+            .optional()?
+            .ok_or(Error::NoteNotFound(id))
+    }
+
+    pub fn create_note(&mut self, title: Option<&str>, detail: &str) -> Result<Note> {
+        self.conn.execute(
+            "INSERT INTO notes (title, detail, updated_at) VALUES (?1, ?2, ?3)",
+            params![title, detail, Utc::now()],
+        )?;
+        self.get_note(self.conn.last_insert_rowid())
+    }
+
+    pub fn update_note(&mut self, id: i64, title: Option<&str>, detail: &str) -> Result<Note> {
+        let changed = self.conn.execute(
+            "UPDATE notes SET title = ?2, detail = ?3, updated_at = ?4
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![id, title, detail, Utc::now()],
+        )?;
+        if changed == 0 {
+            return Err(Error::NoteNotFound(id));
+        }
+        self.get_note(id)
+    }
+
+    /// Soft-deletes a note, keeping it restorable from the deleted notes.
+    pub fn delete_note(&mut self, id: i64) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE notes SET deleted_at = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+            params![id, Utc::now()],
+        )?;
+        if changed == 0 {
+            return Err(Error::NoteNotFound(id));
+        }
+        Ok(())
+    }
+
+    /// Deleted notes with their deletion times, most recently deleted first.
+    pub fn list_deleted_notes(&self) -> Result<Vec<(Note, DateTime<Utc>)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, title, detail, updated_at, deleted_at FROM notes
+             WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id DESC",
+        )?;
+        let notes = stmt
+            .query_map([], |r| Ok((note_from_row(r)?, r.get(4)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(notes)
+    }
+
+    pub fn restore_note(&mut self, id: i64) -> Result<Note> {
+        let changed = self.conn.execute(
+            "UPDATE notes SET deleted_at = NULL WHERE id = ?1 AND deleted_at IS NOT NULL",
+            [id],
+        )?;
+        if changed == 0 {
+            return Err(Error::NoteNotFound(id));
+        }
+        self.get_note(id)
+    }
+
+    /// Removes a deleted note from the database for good. Notes that aren't deleted can't
+    /// be purged.
+    pub fn purge_note(&mut self, id: i64) -> Result<()> {
+        let changed = self.conn.execute(
+            "DELETE FROM notes WHERE id = ?1 AND deleted_at IS NOT NULL",
+            [id],
+        )?;
+        if changed == 0 {
+            return Err(Error::NoteNotFound(id));
+        }
+        Ok(())
+    }
 }
 
 /// Turns a unique-index violation on the project name into `DuplicateProjectName`.
@@ -506,6 +624,15 @@ fn ticket_from_row(row: &Row<'_>) -> rusqlite::Result<Ticket> {
     })
 }
 
+fn note_from_row(row: &Row<'_>) -> rusqlite::Result<Note> {
+    Ok(Note {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        detail: row.get(2)?,
+        updated_at: row.get(3)?,
+    })
+}
+
 fn validate(conn: &Connection) -> Result<()> {
     // The first read is where SQLite notices a file that is not a database at all.
     let application_id: i32 = conn
@@ -516,7 +643,7 @@ fn validate(conn: &Connection) -> Result<()> {
     }
 
     let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version != SCHEMA_VERSION && version != 3 {
+    if !(MIN_SCHEMA_VERSION..=SCHEMA_VERSION).contains(&version) {
         return Err(Error::Invalid(format!(
             "unsupported schema version {version} (expected {SCHEMA_VERSION}); \
              files from before multi-project support can't be opened"
@@ -549,7 +676,7 @@ fn validate(conn: &Connection) -> Result<()> {
         conn.execute_batch(&format!(
             "BEGIN;
              {PROJECT_NAME_INDEX_SQL}
-             PRAGMA user_version = {SCHEMA_VERSION};
+             PRAGMA user_version = 4;
              COMMIT;"
         ))
         .map_err(|e| {
@@ -570,6 +697,20 @@ fn validate(conn: &Connection) -> Result<()> {
             "missing unique index `{PROJECT_NAME_INDEX}` on project names"
         )));
     }
+
+    if version <= 4 {
+        conn.execute_batch(&format!(
+            "BEGIN;
+             {NOTES_SCHEMA}
+             PRAGMA user_version = {SCHEMA_VERSION};
+             COMMIT;"
+        ))
+        .map_err(|e| {
+            let _ = conn.execute_batch("ROLLBACK");
+            Error::Invalid(format!("could not add the notes table ({e})"))
+        })?;
+    }
+    validate_table(conn, "notes", NOTE_COLUMNS)?;
     Ok(())
 }
 
@@ -984,6 +1125,76 @@ mod tests {
             panic!("duplicate names accepted");
         };
         assert!(reason.contains("rename duplicate projects"), "{reason}");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn notes_crud_and_soft_delete() {
+        let path = temp_path("notes");
+        let mut store = Store::open(&path).unwrap();
+        let a = store.create_note(None, "first").unwrap();
+        let b = store.create_note(Some("Groceries"), "- milk").unwrap();
+        assert_eq!(a.title, None);
+        assert_eq!(b.title.as_deref(), Some("Groceries"));
+
+        let ids = |store: &Store| -> Vec<i64> {
+            store.list_notes().unwrap().iter().map(|n| n.id).collect()
+        };
+        assert_eq!(ids(&store), vec![b.id, a.id], "most recently updated first");
+        let updated = store.update_note(a.id, Some("Title"), "changed").unwrap();
+        assert_eq!(updated.detail, "changed");
+        assert_eq!(ids(&store), vec![a.id, b.id]);
+
+        store.delete_note(a.id).unwrap();
+        assert_eq!(ids(&store), vec![b.id]);
+        assert!(matches!(store.get_note(a.id), Err(Error::NoteNotFound(_))));
+        assert!(matches!(
+            store.update_note(a.id, None, ""),
+            Err(Error::NoteNotFound(_))
+        ));
+        assert!(matches!(
+            store.purge_note(b.id),
+            Err(Error::NoteNotFound(_))
+        ));
+        let deleted = store.list_deleted_notes().unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].0.id, a.id);
+
+        store.restore_note(a.id).unwrap();
+        assert_eq!(ids(&store), vec![a.id, b.id]);
+        store.delete_note(b.id).unwrap();
+        store.purge_note(b.id).unwrap();
+        assert!(store.list_deleted_notes().unwrap().is_empty());
+        assert!(matches!(
+            store.restore_note(b.id),
+            Err(Error::NoteNotFound(_))
+        ));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn migrates_version_4_files() {
+        let path = temp_path("migrate-v4");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!(
+                "{SCHEMA}
+                 {PROJECT_NAME_INDEX_SQL}
+                 PRAGMA application_id = {APPLICATION_ID};
+                 PRAGMA user_version = 4;"
+            ))
+            .unwrap();
+
+        let mut store = Store::open(&path).unwrap();
+        store.create_note(None, "hello").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.list_notes().unwrap().len(), 1);
+        let version: i32 = store
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
         std::fs::remove_file(&path).unwrap();
     }
 

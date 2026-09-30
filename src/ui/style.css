@@ -94,7 +94,7 @@ dialog.alert .response-area > button {
 
 .ticket-preview {
   font-size: 12.5pt;
-  line-height: 1.4;
+  line-height: 1.25;
 }
 
 .md-code {
@@ -135,4 +135,17 @@ checkbutton.md-task check:checked {
 
 .project-card {
   padding: 6px 6px 6px 16px;
+}
+
+.note-grid > flowboxchild {
+  padding: 0;
+  border-radius: 6px;
+}
+
+.note-card {
+  padding: 12px 6px 10px 16px;
+}
+
+.note-snippet {
+  line-height: 1.25;
 }

@@ -60,3 +60,13 @@ pub struct Ticket {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+#[derive(Clone, Debug)]
+pub struct Note {
+    pub id: i64,
+    /// `None` for untitled notes.
+    pub title: Option<String>,
+    /// Markdown.
+    pub detail: String,
+    pub updated_at: DateTime<Utc>,
+}

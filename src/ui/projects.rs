@@ -42,7 +42,7 @@ impl ProjectsPage {
         window: &adw::ApplicationWindow,
         toasts: &adw::ToastOverlay,
         navigation: &adw::NavigationView,
-        sidebar_toggle: &gtk::ToggleButton,
+        section_menu: &gtk::MenuButton,
         store: Rc<RefCell<Store>>,
         on_open: impl Fn(Project) + 'static,
     ) -> Rc<Self> {
@@ -64,7 +64,7 @@ impl ProjectsPage {
         new_button.set_cursor_from_name(Some("pointer"));
         pointer::set_on_menu_items(new_button.popover());
         let header = adw::HeaderBar::new();
-        header.pack_start(sidebar_toggle);
+        header.pack_start(section_menu);
         header.pack_end(&new_button);
 
         let grid = gtk::FlowBox::builder()

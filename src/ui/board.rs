@@ -117,13 +117,13 @@ impl Board {
         window: &adw::ApplicationWindow,
         toasts: &adw::ToastOverlay,
         navigation: &adw::NavigationView,
-        sidebar_toggle: &gtk::ToggleButton,
+        section_menu: &gtk::MenuButton,
         store: Rc<RefCell<Store>>,
         project: Project,
     ) -> Rc<Self> {
-        // The sidebar's "Projects" entry leads back, so the toggle takes the back button's place.
+        // The section menu's "Projects" entry leads back, so it takes the back button's place.
         let header = adw::HeaderBar::builder().show_back_button(false).build();
-        header.pack_start(sidebar_toggle);
+        header.pack_start(section_menu);
 
         // GtkSearchEntry emits `search-changed` only after `search-delay` ms without typing.
         let search = gtk::SearchEntry::builder()
@@ -176,8 +176,11 @@ impl Board {
         toolbar.add_top_bar(&header);
         toolbar.add_top_bar(&search_bar);
         toolbar.set_content(Some(&board_scroller));
+        // Not poppable by swipe gestures, Escape or the mouse's back button; the section
+        // menu's "Projects" entry still pops it programmatically.
         let page = adw::NavigationPage::builder()
             .title(&project.name)
+            .can_pop(false)
             .child(&toolbar)
             .build();
 

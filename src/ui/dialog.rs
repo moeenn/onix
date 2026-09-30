@@ -580,7 +580,7 @@ impl TicketDialog {
 }
 
 /// Replaces the default paste in a single-line entry with one that trims the pasted text.
-fn trim_pasted_text_in_entry(text: &gtk::Text) {
+pub(super) fn trim_pasted_text_in_entry(text: &gtk::Text) {
     text.connect_paste_clipboard(|text| {
         text.stop_signal_emission_by_name("paste-clipboard");
         let clipboard = text.clipboard();
@@ -604,7 +604,7 @@ fn trim_pasted_text_in_entry(text: &gtk::Text) {
 }
 
 /// Replaces the default paste in a text view with one that trims the pasted text.
-fn trim_pasted_text_in_view(view: &gtk::TextView) {
+pub(super) fn trim_pasted_text_in_view(view: &gtk::TextView) {
     view.connect_paste_clipboard(|view| {
         view.stop_signal_emission_by_name("paste-clipboard");
         let clipboard = view.clipboard();
@@ -629,7 +629,7 @@ fn trim_pasted_text_in_view(view: &gtk::TextView) {
 }
 
 /// Makes Tab insert two spaces (replacing any selection) instead of a tab character.
-fn indent_with_spaces(view: &gtk::TextView) {
+pub(super) fn indent_with_spaces(view: &gtk::TextView) {
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     keys.connect_key_pressed(clone!(
@@ -663,9 +663,9 @@ fn indent_with_spaces(view: &gtk::TextView) {
 const INDENT: &str = "  ";
 
 /// Width of a tab in the details editor, in characters.
-const TAB_WIDTH_CHARS: usize = 2;
+pub(super) const TAB_WIDTH_CHARS: usize = 2;
 
-fn set_tab_width(view: &gtk::TextView, chars: usize) {
+pub(super) fn set_tab_width(view: &gtk::TextView, chars: usize) {
     let (width, _) = view
         .create_pango_layout(Some(&" ".repeat(chars)))
         .pixel_size();

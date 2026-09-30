@@ -1,9 +1,13 @@
 mod board;
 mod code_spans;
+mod deleted_notes;
 mod deleted_projects;
 mod deleted_tickets;
 mod dialog;
 mod markdown_view;
+mod note_editor;
+mod note_view;
+mod notes;
 mod pointer;
 mod project_dialog;
 mod projects;
@@ -12,15 +16,16 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::gdk;
 use gtk::glib::{self, clone};
+use gtk::{gdk, gio};
 
 use crate::db::Store;
 use crate::model::Project;
 use board::Board;
+use notes::NotesPage;
 use projects::ProjectsPage;
 
-/// Sidebar entries: the section's name in the content stack, and its label.
+/// Sections of the window: the name in the content stack, and the label in the section menu.
 const SECTIONS: [(&str, &str); 2] = [("projects", "Projects"), ("notes", "Notes")];
 
 pub fn build(app: &adw::Application, store: Store) {
@@ -53,18 +58,22 @@ fn load_css() {
     }
 }
 
-/// The main window: a sidebar of sections, and the selected section's content.
+/// Window action that switches to the section named by its string parameter.
+const SECTION_ACTION: &str = "section";
+
+/// The main window: the selected section's content, switched with each page's section menu.
 struct Shell {
     window: adw::ApplicationWindow,
     store: Rc<RefCell<Store>>,
     toasts: adw::ToastOverlay,
-    sidebar: gtk::ListBox,
-    split: adw::OverlaySplitView,
     sections: gtk::Stack,
     /// The projects page, with a project's board pushed on top of it while one is open.
     navigation: adw::NavigationView,
     projects: Rc<ProjectsPage>,
     board: RefCell<Option<Rc<Board>>>,
+    /// The notes page, with a note's editor or the deleted notes pushed on top of it.
+    notes_navigation: adw::NavigationView,
+    notes: Rc<NotesPage>,
 }
 
 impl Shell {
@@ -80,50 +89,21 @@ impl Shell {
         let store = Rc::new(RefCell::new(store));
         let toasts = adw::ToastOverlay::new();
 
-        let sidebar = gtk::ListBox::builder()
-            .selection_mode(gtk::SelectionMode::Single)
-            .css_classes(["navigation-sidebar"])
-            .build();
-        for (_, label) in SECTIONS {
-            let row = gtk::ListBoxRow::builder()
-                .child(&gtk::Label::builder().label(label).xalign(0.0).build())
-                .build();
-            row.set_cursor_from_name(Some("pointer"));
-            sidebar.append(&row);
-        }
-        sidebar.select_row(sidebar.row_at_index(0).as_ref());
-        let sidebar_scroller = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .vexpand(true)
-            .child(&sidebar)
-            .build();
-        let sidebar_page = adw::ToolbarView::new();
-        sidebar_page.add_top_bar(
-            &adw::HeaderBar::builder()
-                .title_widget(&adw::WindowTitle::new("Onix", ""))
-                .build(),
-        );
-        sidebar_page.set_content(Some(&sidebar_scroller));
-
         let navigation = adw::NavigationView::new();
         let sections = gtk::Stack::new();
-        let split = adw::OverlaySplitView::builder()
-            .sidebar(&sidebar_page)
-            .content(&sections)
-            .min_sidebar_width(180.0)
-            .max_sidebar_width(220.0)
-            .build();
 
-        let notes_header = adw::HeaderBar::builder()
-            .title_widget(&adw::WindowTitle::new("Notes", ""))
-            .build();
-        notes_header.pack_start(&sidebar_toggle(&split));
-        let notes_page = adw::ToolbarView::new();
-        notes_page.add_top_bar(&notes_header);
+        let notes_navigation = adw::NavigationView::new();
+        let notes = NotesPage::new(
+            &window,
+            &toasts,
+            &notes_navigation,
+            &section_menu(SECTIONS[1].1),
+            Rc::clone(&store),
+        );
 
         sections.add_named(&navigation, Some(SECTIONS[0].0));
-        sections.add_named(&notes_page, Some(SECTIONS[1].0));
-        toasts.set_child(Some(&split));
+        sections.add_named(&notes_navigation, Some(SECTIONS[1].0));
+        toasts.set_child(Some(&sections));
         window.set_content(Some(&toasts));
 
         let shell = Rc::new_cyclic(|weak: &std::rc::Weak<Self>| {
@@ -132,7 +112,7 @@ impl Shell {
                 &window,
                 &toasts,
                 &navigation,
-                &sidebar_toggle(&split),
+                &section_menu(SECTIONS[0].1),
                 Rc::clone(&store),
                 move |project| {
                     if let Some(shell) = weak.upgrade() {
@@ -144,12 +124,12 @@ impl Shell {
                 window,
                 store,
                 toasts,
-                sidebar,
-                split,
                 sections,
                 navigation,
                 projects,
                 board: RefCell::default(),
+                notes_navigation,
+                notes,
             }
         });
         shell.connect_signals();
@@ -159,23 +139,36 @@ impl Shell {
     fn connect_signals(self: &Rc<Self>) {
         let shell = Rc::clone(self);
 
-        self.sidebar.connect_row_activated(clone!(
+        let section = gio::SimpleAction::new_stateful(
+            SECTION_ACTION,
+            Some(glib::VariantTy::STRING),
+            &SECTIONS[0].0.to_variant(),
+        );
+        section.connect_activate(clone!(
             #[weak]
             shell,
-            move |_, row| {
-                let Some((name, _)) = usize::try_from(row.index())
-                    .ok()
-                    .and_then(|i| SECTIONS.get(i))
-                else {
+            move |action, parameter| {
+                let Some(name) = parameter.and_then(|p| p.str()).and_then(|p| {
+                    SECTIONS
+                        .iter()
+                        .map(|(name, _)| name)
+                        .find(|name| **name == p)
+                }) else {
                     return;
                 };
+                action.set_state(&name.to_variant());
                 shell.sections.set_visible_child_name(name);
                 // Clicking "Projects" from a board goes back to the project cards.
                 if *name == SECTIONS[0].0 {
                     shell.navigation.pop_to_tag(projects::PAGE_TAG);
                 }
+                // Likewise "Notes" from a note's editor, which saves the note.
+                if *name == SECTIONS[1].0 {
+                    shell.notes_navigation.pop_to_tag(notes::PAGE_TAG);
+                }
             }
         ));
+        self.window.add_action(&section);
 
         self.navigation.connect_popped(clone!(
             #[weak]
@@ -203,19 +196,33 @@ impl Shell {
                     if shell.window.visible_dialog().is_some() {
                         return glib::Propagation::Proceed;
                     }
-                    match shell.visible_board() {
-                        Some(board) => {
-                            board.focus_search();
-                            glib::Propagation::Stop
-                        }
-                        None => glib::Propagation::Proceed,
+                    if let Some(board) = shell.visible_board() {
+                        board.focus_search();
+                        return glib::Propagation::Stop;
                     }
+                    if shell.notes_page_visible() {
+                        shell.notes.focus_search();
+                        return glib::Propagation::Stop;
+                    }
+                    glib::Propagation::Proceed
                 }
             ))),
         );
         let shortcuts = gtk::ShortcutController::new();
         shortcuts.add_shortcut(focus_search);
         self.window.add_controller(shortcuts);
+
+        // Autosave only runs every few seconds; keep what was typed since.
+        self.window.connect_close_request(clone!(
+            #[weak]
+            shell,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_| {
+                shell.notes.save_open_editor();
+                glib::Propagation::Proceed
+            }
+        ));
     }
 
     /// Shows the board of `project` on top of the project cards.
@@ -225,7 +232,7 @@ impl Shell {
             &self.window,
             &self.toasts,
             &self.navigation,
-            &sidebar_toggle(&self.split),
+            &section_menu(SECTIONS[0].1),
             Rc::clone(&self.store),
             project,
         );
@@ -240,20 +247,33 @@ impl Shell {
             && self.navigation.visible_page().as_ref() == Some(board.page());
         shown.then_some(board)
     }
+
+    /// Whether the window shows the note cards.
+    fn notes_page_visible(&self) -> bool {
+        self.sections.visible_child_name().as_deref() == Some(SECTIONS[1].0)
+            && self.notes_navigation.visible_page().as_ref() == Some(self.notes.page())
+    }
 }
 
-/// A header bar button that shows and hides the sidebar. Every content page gets its own,
-/// all kept in sync with the split view.
-fn sidebar_toggle(split: &adw::OverlaySplitView) -> gtk::ToggleButton {
-    let toggle = gtk::ToggleButton::builder()
-        .icon_name("sidebar-show-symbolic")
-        .tooltip_text("Toggle Sidebar")
+/// A header bar drop-down that switches between the window's sections, labeled with
+/// `label`, the section of the page it is on. Every content page gets its own.
+fn section_menu(label: &str) -> gtk::MenuButton {
+    let menu = gio::Menu::new();
+    for (name, label) in SECTIONS {
+        let item = gio::MenuItem::new(Some(label), None);
+        item.set_action_and_target_value(
+            Some(&format!("win.{SECTION_ACTION}")),
+            Some(&name.to_variant()),
+        );
+        menu.append_item(&item);
+    }
+    let button = gtk::MenuButton::builder()
+        .label(label)
+        .always_show_arrow(true)
+        .menu_model(&menu)
+        .tooltip_text("Switch Section")
         .build();
-    toggle.set_cursor_from_name(Some("pointer"));
-    split
-        .bind_property("show-sidebar", &toggle, "active")
-        .bidirectional()
-        .sync_create()
-        .build();
-    toggle
+    button.set_cursor_from_name(Some("pointer"));
+    pointer::set_on_menu_items(button.popover());
+    button
 }
