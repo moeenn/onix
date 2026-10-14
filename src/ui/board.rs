@@ -13,7 +13,7 @@ use super::pointer;
 use crate::db::Store;
 use crate::model::{Project, Status, Ticket};
 
-const COLUMN_WIDTH: i32 = 320;
+const COLUMN_WIDTH: i32 = 360;
 const SEARCH_DEBOUNCE_MS: u32 = 250;
 
 struct Column {
