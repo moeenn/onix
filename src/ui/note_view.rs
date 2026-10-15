@@ -12,7 +12,6 @@ use gtk::pango;
 use super::dialog::format_time;
 use super::markdown_view;
 use super::notes::{NotesPage, display_title};
-use super::pointer;
 use crate::markdown;
 use crate::model::Note;
 
@@ -33,6 +32,7 @@ pub struct NoteView {
     /// For callbacks created after construction, such as the rendered checkboxes.
     this: Weak<Self>,
     page: adw::NavigationPage,
+    back_button: gtk::Button,
     edit_button: gtk::Button,
     delete_button: gtk::Button,
     restore_button: gtk::Button,
@@ -75,7 +75,7 @@ impl NoteView {
         let deleted = deleted_actions.is_some();
         let edit_button = gtk::Button::builder()
             .label("Edit")
-            .tooltip_text("Edit note (Ctrl+E)")
+            .tooltip_text("Edit note (E)")
             .css_classes(["suggested-action"])
             .build();
         let delete_button = gtk::Button::builder()
@@ -93,14 +93,26 @@ impl NoteView {
             .tooltip_text("Erase note for good")
             .css_classes(["destructive-action"])
             .build();
-        for button in [&edit_button, &delete_button, &restore_button, &purge_button] {
+        // The page can't be popped by gestures, so libadwaita shows no back button of its own.
+        let back_button = gtk::Button::builder()
+            .icon_name("go-previous-symbolic")
+            .tooltip_text("Back (Escape)")
+            .build();
+        for button in [
+            &back_button,
+            &edit_button,
+            &delete_button,
+            &restore_button,
+            &purge_button,
+        ] {
             button.set_cursor_from_name(Some("pointer"));
         }
         edit_button.set_visible(!deleted);
         delete_button.set_visible(!deleted);
         restore_button.set_visible(deleted);
         purge_button.set_visible(deleted);
-        let header = adw::HeaderBar::new();
+        let header = adw::HeaderBar::builder().show_back_button(false).build();
+        header.pack_start(&back_button);
         header.pack_end(&edit_button);
         header.pack_end(&restore_button);
         header.pack_end(&delete_button);
@@ -173,8 +185,12 @@ impl NoteView {
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&header);
         toolbar.set_content(Some(&overlay));
+        // Not poppable by swipe gestures, Escape or the mouse's back button, so a stray
+        // two-finger swipe doesn't leave the note; the back button and the Escape and Alt+Left
+        // shortcuts pop it programmatically.
         let page = adw::NavigationPage::builder()
             .title("Note")
+            .can_pop(false)
             .child(&toolbar)
             .build();
 
@@ -183,6 +199,7 @@ impl NoteView {
             deleted: deleted_actions,
             this: weak.clone(),
             page,
+            back_button,
             edit_button,
             delete_button,
             restore_button,
@@ -202,6 +219,11 @@ impl NoteView {
 
     fn connect_signals(self: &Rc<Self>) {
         let this = Rc::clone(self);
+        self.back_button.connect_clicked(clone!(
+            #[weak]
+            this,
+            move |_| this.go_back()
+        ));
         self.edit_button.connect_clicked(clone!(
             #[weak]
             this,
@@ -247,21 +269,36 @@ impl NoteView {
                 for label in this.labels() {
                     label.select_region(0, 0);
                 }
-                // The back button is created inside libadwaita once the page is shown.
-                pointer::set_on_buttons(this.page.upcast_ref());
             }
         ));
 
+        // Bubble phase, so an "e" typed into the search entry still reaches the entry first.
         let shortcuts = gtk::ShortcutController::new();
         shortcuts.add_shortcut(gtk::Shortcut::new(
-            gtk::ShortcutTrigger::parse_string("<Control>e"),
+            gtk::ShortcutTrigger::parse_string("<Control>e|e"),
             Some(gtk::CallbackAction::new(clone!(
                 #[weak]
                 this,
                 #[upgrade_or]
                 glib::Propagation::Proceed,
                 move |_, _| {
+                    if this.deleted.is_some() {
+                        return glib::Propagation::Proceed;
+                    }
                     this.edit();
+                    glib::Propagation::Stop
+                }
+            ))),
+        ));
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("<Alt>Left"),
+            Some(gtk::CallbackAction::new(clone!(
+                #[weak]
+                this,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, _| {
+                    this.go_back();
                     glib::Propagation::Stop
                 }
             ))),
@@ -281,8 +318,8 @@ impl NoteView {
         ));
         self.page.add_controller(shortcuts);
 
-        // Capture phase, so Escape closes an open search before the navigation view sees it
-        // and goes back, wherever the focus is on the page.
+        // Capture phase, so Escape closes an open search, rather than going back, wherever the
+        // focus is on the page.
         let escape = gtk::ShortcutController::new();
         escape.set_propagation_phase(gtk::PropagationPhase::Capture);
         escape.add_shortcut(gtk::Shortcut::new(
@@ -293,10 +330,11 @@ impl NoteView {
                 #[upgrade_or]
                 glib::Propagation::Proceed,
                 move |_, _| {
-                    if !this.search_bar.reveals_child() {
-                        return glib::Propagation::Proceed;
+                    if this.search_bar.reveals_child() {
+                        this.close_search();
+                    } else {
+                        this.go_back();
                     }
-                    this.close_search();
                     glib::Propagation::Stop
                 }
             ))),
@@ -314,6 +352,17 @@ impl NoteView {
             this,
             move |_| this.close_search()
         ));
+    }
+
+    /// Returns to the page the note was opened from.
+    fn go_back(&self) {
+        if let Some(navigation) = self
+            .page
+            .ancestor(adw::NavigationView::static_type())
+            .and_downcast::<adw::NavigationView>()
+        {
+            navigation.pop();
+        }
     }
 
     fn open_search(&self) {

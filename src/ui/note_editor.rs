@@ -251,7 +251,7 @@ impl NoteEditor {
                 }
             ))),
         ));
-        // Only from a new note that's still blank, so nothing typed is left behind by it.
+        // Saves and returns to the note cards, even when opened from the note's view.
         shortcuts.add_shortcut(gtk::Shortcut::new(
             gtk::ShortcutTrigger::parse_string("<Alt>Left"),
             Some(gtk::CallbackAction::new(clone!(
@@ -260,10 +260,10 @@ impl NoteEditor {
                 #[upgrade_or]
                 glib::Propagation::Proceed,
                 move |_, _| {
-                    if !this.is_blank_new_note() {
-                        return glib::Propagation::Proceed;
+                    this.save();
+                    if let Some(notes) = this.notes.upgrade() {
+                        notes.navigation().pop_to_page(notes.page());
                     }
-                    this.go_back();
                     glib::Propagation::Stop
                 }
             ))),
@@ -300,12 +300,6 @@ impl NoteEditor {
         let buffer = &self.detail_buffer;
         let detail = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
         (title, detail.to_string())
-    }
-
-    /// Whether this is a new note with nothing typed in it yet.
-    fn is_blank_new_note(&self) -> bool {
-        let (title, detail) = self.edited_content();
-        self.note.borrow().is_none() && title.is_none() && detail.trim().is_empty()
     }
 
     fn is_dirty(&self) -> bool {

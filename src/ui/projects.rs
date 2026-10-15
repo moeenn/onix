@@ -8,6 +8,7 @@ use gtk::gio;
 use gtk::glib::{self, clone};
 
 use super::deleted_projects::{self, DeletedProjectsPage};
+use super::notes::{delete_key_controller, focus_card_near};
 use super::{board, pointer, project_dialog};
 use crate::db::Store;
 use crate::model::Project;
@@ -167,6 +168,22 @@ impl ProjectsPage {
             this,
             move |_| this.refresh()
         ));
+        self.grid.add_controller(delete_key_controller(clone!(
+            #[weak]
+            this,
+            move |index| {
+                let project = this.projects.borrow().get(index).cloned();
+                if let Some(project) = project {
+                    // Keeps the focus on the grid once the card is gone.
+                    let weak = Rc::downgrade(&this);
+                    this.confirm_delete(&project, move || {
+                        if let Some(this) = weak.upgrade() {
+                            focus_card_near(&this.cards(), index);
+                        }
+                    });
+                }
+            }
+        )));
         self.grid.connect_child_activated(clone!(
             #[weak]
             this,
@@ -262,7 +279,7 @@ impl ProjectsPage {
             this,
             #[strong]
             project,
-            move |_, _| this.confirm_delete(&project)
+            move |_, _| this.confirm_delete(&project, || {})
         ));
         let actions = gio::SimpleActionGroup::new();
         actions.add_action(&edit);
@@ -279,7 +296,21 @@ impl ProjectsPage {
         card.upcast()
     }
 
-    fn confirm_delete(self: &Rc<Self>, project: &Project) {
+    /// The grid's cards, in the order of `projects`.
+    fn cards(&self) -> Vec<gtk::FlowBoxChild> {
+        let mut cards = Vec::new();
+        let mut child = self.grid.first_child();
+        while let Some(current) = child {
+            child = current.next_sibling();
+            if let Ok(card) = current.downcast::<gtk::FlowBoxChild>() {
+                cards.push(card);
+            }
+        }
+        cards
+    }
+
+    /// Asks before deleting `project`, and calls `on_deleted` once it is.
+    fn confirm_delete(self: &Rc<Self>, project: &Project, on_deleted: impl Fn() + 'static) {
         let alert = adw::AlertDialog::new(
             Some("Delete project?"),
             Some(&format!(
@@ -302,8 +333,8 @@ impl ProjectsPage {
                 #[weak]
                 this,
                 move |_, response| {
-                    if response == "delete" {
-                        this.delete_project(id);
+                    if response == "delete" && this.delete_project(id) {
+                        on_deleted();
                     }
                 }
             ),
@@ -311,13 +342,21 @@ impl ProjectsPage {
         alert.present(Some(&self.window));
     }
 
-    fn delete_project(self: &Rc<Self>, id: i64) {
+    /// Whether the project was deleted.
+    fn delete_project(self: &Rc<Self>, id: i64) -> bool {
         let result = self.store.borrow_mut().delete_project(id);
-        match result {
-            Ok(()) => self.toast("Project deleted"),
-            Err(e) => self.toast(&format!("Could not delete project: {e}")),
-        }
+        let deleted = match result {
+            Ok(()) => {
+                self.toast("Project deleted");
+                true
+            }
+            Err(e) => {
+                self.toast(&format!("Could not delete project: {e}"));
+                false
+            }
+        };
         self.refresh();
+        deleted
     }
 
     pub fn create_project(self: &Rc<Self>, name: &str) -> Result<Project, String> {

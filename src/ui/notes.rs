@@ -4,8 +4,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::gio;
 use gtk::glib::{self, clone};
+use gtk::{gdk, gio};
 
 use super::deleted_notes::{self, DeletedNotesPage};
 use super::note_editor::NoteEditor;
@@ -233,6 +233,11 @@ impl NotesPage {
                 }
             }
         ));
+        self.grid.add_controller(delete_key_controller(clone!(
+            #[weak]
+            this,
+            move |index| this.confirm_delete_card(index)
+        )));
         self.navigation.connect_popped(clone!(
             #[weak]
             this,
@@ -387,6 +392,25 @@ impl NotesPage {
         card.upcast()
     }
 
+    /// Asks before deleting the note of the card at `index`, then keeps the focus on the grid.
+    fn confirm_delete_card(self: &Rc<Self>, index: usize) {
+        let Some(note) = self.entries.borrow().get(index).map(|(_, n)| n.clone()) else {
+            return;
+        };
+        let weak = Rc::downgrade(self);
+        self.confirm_delete(&note, move || {
+            if let Some(this) = weak.upgrade() {
+                let cards: Vec<_> = this
+                    .entries
+                    .borrow()
+                    .iter()
+                    .map(|(c, _)| c.clone())
+                    .collect();
+                focus_card_near(&cards, index);
+            }
+        });
+    }
+
     /// Asks before deleting `note`, and calls `on_deleted` once it is.
     pub fn confirm_delete(self: &Rc<Self>, note: &Note, on_deleted: impl Fn() + 'static) {
         let alert = adw::AlertDialog::new(
@@ -480,6 +504,53 @@ pub fn card_grid() -> gtk::FlowBox {
         .valign(gtk::Align::Start)
         .css_classes(["note-grid"])
         .build()
+}
+
+/// Calls `on_delete` with the index of the grid's focused card when Delete is pressed.
+pub fn delete_key_controller(on_delete: impl Fn(usize) + 'static) -> gtk::EventControllerKey {
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(move |keys, key, _, state| {
+        if !is_plain(state) || !matches!(key, gdk::Key::Delete | gdk::Key::KP_Delete) {
+            return glib::Propagation::Proceed;
+        }
+        let index = keys
+            .widget()
+            .and_then(|grid| grid.focus_child())
+            .and_downcast::<gtk::FlowBoxChild>()
+            .and_then(|child| usize::try_from(child.index()).ok());
+        match index {
+            Some(index) => {
+                on_delete(index);
+                glib::Propagation::Stop
+            }
+            None => glib::Propagation::Proceed,
+        }
+    });
+    keys
+}
+
+/// Whether no modifier such as Ctrl or Shift is held. Caps Lock and Num Lock don't count.
+pub fn is_plain(state: gdk::ModifierType) -> bool {
+    !state.intersects(
+        gdk::ModifierType::SHIFT_MASK
+            | gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::SUPER_MASK
+            | gdk::ModifierType::META_MASK,
+    )
+}
+
+/// Focuses the first visible card from `index` on, or else the last visible one before it,
+/// such as after the card at `index` was removed. Waits a turn, so a dialog closing meanwhile
+/// doesn't hand the focus back elsewhere.
+pub fn focus_card_near(cards: &[gtk::FlowBoxChild], index: usize) {
+    let after = cards.iter().skip(index).find(|c| c.is_visible());
+    let card = after.or_else(|| cards.iter().take(index).rev().find(|c| c.is_visible()));
+    if let Some(card) = card.cloned() {
+        glib::idle_add_local_once(move || {
+            card.grab_focus();
+        });
+    }
 }
 
 /// A card with the note's title in bold (if it has one), the start of its detail, a `meta`

@@ -9,6 +9,7 @@ use gtk::{gdk, gio, graphene};
 
 use super::deleted_tickets::DeletedTicketsPage;
 use super::dialog::{self, Target};
+use super::notes::is_plain;
 use super::{pointer, projects};
 use crate::db::Store;
 use crate::model::{Project, Status, Ticket};
@@ -95,6 +96,17 @@ impl Column {
             entries: RefCell::default(),
         }
     }
+
+    /// The cards not hidden by the search, top to bottom.
+    fn visible_cards(&self) -> Vec<gtk::Widget> {
+        self.entries
+            .borrow()
+            .iter()
+            .map(|(card, _)| card)
+            .filter(|card| card.is_visible())
+            .cloned()
+            .collect()
+    }
 }
 
 pub struct Board {
@@ -109,6 +121,8 @@ pub struct Board {
     /// Kept while pushed, so its handlers stay alive.
     deleted_tickets: RefCell<Option<Rc<DeletedTicketsPage>>>,
     search: gtk::SearchEntry,
+    /// Scrolls the columns sideways.
+    scroller: gtk::ScrolledWindow,
     columns: Vec<Column>,
     query: RefCell<String>,
     /// Id of the ticket currently being dragged, if any.
@@ -200,6 +214,7 @@ impl Board {
             navigation: navigation.clone(),
             deleted_tickets: RefCell::default(),
             search: search.clone(),
+            scroller: board_scroller,
             columns,
             query: RefCell::default(),
             dragging: Cell::new(None),
@@ -254,6 +269,29 @@ impl Board {
             ))),
         ));
         self.page.add_controller(shortcuts);
+
+        // Arrow keys pressed on a card move between cards in the card's own key handler;
+        // pressed elsewhere on the board, they start from the first card.
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(clone!(
+            #[weak]
+            board,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, key, _, state| {
+                if !is_plain(state) || direction(key).is_none() || !board.arrows_select_cards() {
+                    return glib::Propagation::Proceed;
+                }
+                let first = board.columns.iter().enumerate().find_map(|(i, column)| {
+                    column.visible_cards().first().map(|card| (i, card.clone()))
+                });
+                if let Some((column, card)) = first {
+                    board.focus_card(column, &card);
+                }
+                glib::Propagation::Stop
+            }
+        ));
+        self.page.add_controller(keys);
 
         let deleted_tickets = gio::SimpleAction::new("deleted-tickets", None);
         deleted_tickets.connect_activate(clone!(
@@ -401,11 +439,20 @@ impl Board {
         keys.connect_key_pressed(clone!(
             #[weak]
             board,
+            #[weak]
+            card,
             #[upgrade_or]
             glib::Propagation::Proceed,
-            move |_, key, _, _| match key {
+            move |_, key, _, state| match key {
                 gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::space => {
                     board.open_ticket(id);
+                    glib::Propagation::Stop
+                }
+                // Stopped even at the board's edges, so the focus stays on the cards.
+                _ if is_plain(state)
+                    && let Some(direction) = direction(key) =>
+                {
+                    board.focus_next_card(card.upcast_ref(), direction);
                     glib::Propagation::Stop
                 }
                 _ => glib::Propagation::Proceed,
@@ -455,6 +502,73 @@ impl Board {
         card.add_controller(drag);
 
         card.upcast()
+    }
+
+    /// Whether arrow keys should focus the first card: when the focus is neither in a text
+    /// field, which uses them to move its cursor, nor in a drop-down menu.
+    fn arrows_select_cards(&self) -> bool {
+        let Some(focus) = gtk::prelude::RootExt::focus(&self.window) else {
+            return true;
+        };
+        !focus.is::<gtk::Editable>() && focus.ancestor(gtk::Popover::static_type()).is_none()
+    }
+
+    /// Focuses the card next to `card` in `direction`: above or below it in its column, or at
+    /// the same height in the nearest column to the side with any cards shown.
+    fn focus_next_card(&self, card: &gtk::Widget, direction: gtk::DirectionType) {
+        let Some((column, row)) = self.columns.iter().enumerate().find_map(|(i, column)| {
+            let row = column.visible_cards().iter().position(|c| c == card)?;
+            Some((i, row))
+        }) else {
+            return;
+        };
+        let cards = self.columns[column].visible_cards();
+        // The card at `row`, or the last one if the column is shorter.
+        let at_row = |(i, column): (usize, &Column)| {
+            let cards = column.visible_cards();
+            cards
+                .get(row)
+                .or(cards.last())
+                .map(|card| (i, card.clone()))
+        };
+        let columns = self.columns.iter().enumerate();
+        let next = match direction {
+            gtk::DirectionType::Up => row
+                .checked_sub(1)
+                .and_then(|r| cards.get(r))
+                .map(|card| (column, card.clone())),
+            gtk::DirectionType::Down => cards.get(row + 1).map(|card| (column, card.clone())),
+            gtk::DirectionType::Left => columns.take(column).rev().find_map(at_row),
+            gtk::DirectionType::Right => columns.skip(column + 1).find_map(at_row),
+            _ => None,
+        };
+        if let Some((column, next)) = next {
+            self.focus_card(column, &next);
+        }
+    }
+
+    /// Focuses `card`, in the column at `column`. For the first or last column, also scrolls
+    /// the board to its start or end, so the column's margin and the board's edge show too.
+    fn focus_card(&self, column: usize, card: &gtk::Widget) {
+        card.grab_focus();
+        let edge = if column == 0 {
+            Some(false)
+        } else if column + 1 == self.columns.len() {
+            Some(true)
+        } else {
+            None
+        };
+        if let Some(end) = edge {
+            // After the scrolled window's own scrolling to the focused card.
+            let adjustment = self.scroller.hadjustment();
+            glib::idle_add_local_once(move || {
+                adjustment.set_value(if end {
+                    adjustment.upper() - adjustment.page_size()
+                } else {
+                    adjustment.lower()
+                });
+            });
+        }
     }
 
     fn open_ticket(self: &Rc<Self>, id: i64) {
@@ -641,6 +755,17 @@ impl Board {
             .map_err(|e| e.to_string());
         self.refresh();
         result
+    }
+}
+
+/// The direction an arrow key moves the focus between cards.
+fn direction(key: gdk::Key) -> Option<gtk::DirectionType> {
+    match key {
+        gdk::Key::Up | gdk::Key::KP_Up => Some(gtk::DirectionType::Up),
+        gdk::Key::Down | gdk::Key::KP_Down => Some(gtk::DirectionType::Down),
+        gdk::Key::Left | gdk::Key::KP_Left => Some(gtk::DirectionType::Left),
+        gdk::Key::Right | gdk::Key::KP_Right => Some(gtk::DirectionType::Right),
+        _ => None,
     }
 }
 
