@@ -1,4 +1,4 @@
-//! Pointer cursors for buttons that libadwaita creates internally.
+//! Pointer cursors and styling for widgets that GTK and libadwaita create internally.
 
 use adw::prelude::*;
 
@@ -35,6 +35,42 @@ pub fn set_on_menu_items(popover: Option<gtk::Popover>) {
     if let Some(popover) = popover {
         popover.connect_map(|popover| set_on_css_name(popover.upcast_ref(), "modelbutton"));
     }
+}
+
+/// Shows the options of a drop-down menu whose text is one of `labels` in red, for actions
+/// that delete something. Like `set_on_menu_items`, the options are found each time the
+/// menu opens.
+pub fn mark_destructive_menu_items(popover: Option<gtk::Popover>, labels: &'static [&'static str]) {
+    if let Some(popover) = popover {
+        popover.connect_map(move |popover| mark_destructive(popover.upcast_ref(), labels));
+    }
+}
+
+fn mark_destructive(root: &gtk::Widget, labels: &[&str]) {
+    if root.css_name() == "modelbutton" && has_label(root, labels) {
+        root.add_css_class("destructive-menu-item");
+        return;
+    }
+    let mut child = root.first_child();
+    while let Some(current) = child {
+        mark_destructive(&current, labels);
+        child = current.next_sibling();
+    }
+}
+
+/// Whether a label inside `root` shows one of `labels`.
+fn has_label(root: &gtk::Widget, labels: &[&str]) -> bool {
+    if let Some(label) = root.downcast_ref::<gtk::Label>() {
+        return labels.contains(&label.label().as_str());
+    }
+    let mut child = root.first_child();
+    while let Some(current) = child {
+        if has_label(&current, labels) {
+            return true;
+        }
+        child = current.next_sibling();
+    }
+    false
 }
 
 fn set_on_css_name(root: &gtk::Widget, name: &str) {

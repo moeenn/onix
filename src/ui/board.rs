@@ -14,6 +14,10 @@ use crate::db::Store;
 use crate::model::{Project, Status, Ticket};
 
 const COLUMN_WIDTH: i32 = 400;
+/// Space between a column's edges and its cards.
+const COLUMN_PADDING: i32 = 8;
+/// Width of the ticket cards, which fill their column.
+pub const CARD_WIDTH: i32 = COLUMN_WIDTH - 2 * COLUMN_PADDING;
 /// Longer titles are cut short on the cards, with an ellipsis.
 const CARD_TITLE_MAX_CHARS: usize = 90;
 const SEARCH_DEBOUNCE_MS: u32 = 250;
@@ -51,8 +55,8 @@ impl Column {
             .label("+  Add ticket")
             .tooltip_text(format!("Add a ticket to {}", status.label()))
             .css_classes(["add-ticket"])
-            .margin_start(8)
-            .margin_end(8)
+            .margin_start(COLUMN_PADDING)
+            .margin_end(COLUMN_PADDING)
             .margin_bottom(4)
             .build();
         add_button.set_cursor_from_name(Some("pointer"));
@@ -60,8 +64,8 @@ impl Column {
         let cards_box = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(8)
-            .margin_start(8)
-            .margin_end(8)
+            .margin_start(COLUMN_PADDING)
+            .margin_end(COLUMN_PADDING)
             .margin_top(6)
             .margin_bottom(12)
             .build();
@@ -129,7 +133,7 @@ impl Board {
 
         // GtkSearchEntry emits `search-changed` only after `search-delay` ms without typing.
         let search = gtk::SearchEntry::builder()
-            .placeholder_text("Press / to search")
+            .placeholder_text("Press / to search tickets")
             .search_delay(SEARCH_DEBOUNCE_MS)
             .hexpand(true)
             .build();
@@ -152,6 +156,7 @@ impl Board {
             .build();
         menu_button.set_cursor_from_name(Some("pointer"));
         pointer::set_on_menu_items(menu_button.popover());
+        pointer::mark_destructive_menu_items(menu_button.popover(), &["Deleted Tickets"]);
         search_bar.append(&menu_button);
 
         let columns: Vec<Column> = Status::ALL.into_iter().map(Column::new).collect();

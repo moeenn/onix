@@ -8,6 +8,7 @@ use gtk::gio;
 use gtk::glib::{self, clone};
 
 use super::dialog::format_time;
+use super::note_view::NoteView;
 use super::notes::{card_grid, display_title, note_card};
 use super::pointer;
 use crate::db::Store;
@@ -20,15 +21,26 @@ pub struct DeletedNotesPage {
     store: Rc<RefCell<Store>>,
     toasts: adw::ToastOverlay,
     page: adw::NavigationPage,
+    navigation: adw::NavigationView,
     /// Shows either the "cards" grid or the "empty" status page.
     content: gtk::Stack,
     grid: gtk::FlowBox,
+    /// The deleted notes in the grid's order.
+    notes: RefCell<Vec<Note>>,
+    /// Kept while pushed, so its handlers stay alive.
+    view: RefCell<Option<Rc<NoteView>>>,
 }
 
 impl DeletedNotesPage {
-    /// `toasts` belongs to the main window, which the page is shown in.
-    pub fn new(toasts: &adw::ToastOverlay, store: Rc<RefCell<Store>>) -> Rc<Self> {
+    /// `toasts` belongs to the main window, which the page is shown in, and `navigation` is
+    /// the view the page is added to, for showing a note on top of it.
+    pub fn new(
+        toasts: &adw::ToastOverlay,
+        navigation: &adw::NavigationView,
+        store: Rc<RefCell<Store>>,
+    ) -> Rc<Self> {
         let grid = card_grid();
+        grid.set_activate_on_single_click(true);
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
@@ -54,17 +66,39 @@ impl DeletedNotesPage {
         // The back button is built by libadwaita.
         page.connect_shown(|page| pointer::set_on_buttons(page.upcast_ref()));
 
+        let shortcuts = gtk::ShortcutController::new();
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("<Alt>Left"),
+            Some(gtk::NamedAction::new("navigation.pop")),
+        ));
+        page.add_controller(shortcuts);
+
         let this = Rc::new(Self {
             store,
             toasts: toasts.clone(),
             page,
+            navigation: navigation.clone(),
             content,
             grid,
+            notes: RefCell::default(),
+            view: RefCell::default(),
         });
         this.page.connect_showing(clone!(
             #[weak]
             this,
             move |_| this.refresh()
+        ));
+        this.grid.connect_child_activated(clone!(
+            #[weak]
+            this,
+            move |_, child| {
+                let note = usize::try_from(child.index())
+                    .ok()
+                    .and_then(|i| this.notes.borrow().get(i).cloned());
+                if let Some(note) = note {
+                    this.open_note(note);
+                }
+            }
         ));
         this.install_actions();
         this
@@ -72,6 +106,34 @@ impl DeletedNotesPage {
 
     pub fn page(&self) -> &adw::NavigationPage {
         &self.page
+    }
+
+    /// Shows `note` read-only, with buttons for restoring it or deleting it for good.
+    fn open_note(self: &Rc<Self>, note: Note) {
+        let id = note.id;
+        let restore = Rc::downgrade(self);
+        let purge = Rc::downgrade(self);
+        let view = NoteView::deleted(
+            note,
+            move || {
+                if let Some(this) = restore.upgrade() {
+                    this.restore(id);
+                    this.navigation.pop_to_page(&this.page);
+                }
+            },
+            move || {
+                if let Some(this) = purge.upgrade() {
+                    let back = Rc::downgrade(&this);
+                    this.confirm_purge(id, move || {
+                        if let Some(this) = back.upgrade() {
+                            this.navigation.pop_to_page(&this.page);
+                        }
+                    });
+                }
+            },
+        );
+        self.navigation.push(view.page());
+        *self.view.borrow_mut() = Some(view);
     }
 
     fn refresh(self: &Rc<Self>) {
@@ -89,15 +151,15 @@ impl DeletedNotesPage {
                 Some(&format!("Deleted {}", format_time(*deleted_at))),
                 &Self::build_menu(note),
             );
-            let child = gtk::FlowBoxChild::builder()
-                .child(&card)
-                .focusable(false)
-                .build();
+            card.add_css_class("activatable");
+            let child = gtk::FlowBoxChild::builder().child(&card).build();
+            child.set_cursor_from_name(Some("pointer"));
             child.update_property(&[gtk::accessible::Property::Label(&display_title(note))]);
             self.grid.append(&child);
         }
         self.content
             .set_visible_child_name(if notes.is_empty() { "empty" } else { "cards" });
+        *self.notes.borrow_mut() = notes.into_iter().map(|(note, _)| note).collect();
     }
 
     /// The card's menu, whose options act on `note`.
@@ -139,7 +201,7 @@ impl DeletedNotesPage {
             this,
             move |_, id| {
                 if let Some(id) = id.and_then(|id| id.get::<i64>()) {
-                    this.confirm_purge(id);
+                    this.confirm_purge(id, || {});
                 }
             }
         ));
@@ -160,7 +222,8 @@ impl DeletedNotesPage {
         self.refresh();
     }
 
-    fn confirm_purge(self: &Rc<Self>, id: i64) {
+    /// Asks before deleting the note for good, and calls `on_purged` once it is.
+    fn confirm_purge(self: &Rc<Self>, id: i64, on_purged: impl Fn() + 'static) {
         let alert = adw::AlertDialog::new(
             Some("Permanently delete note?"),
             Some("The note will be erased. This cannot be undone."),
@@ -179,22 +242,25 @@ impl DeletedNotesPage {
                 #[weak]
                 this,
                 move |_, response| {
-                    if response == "purge" {
-                        this.purge(id);
+                    if response == "purge" && this.purge(id) {
+                        on_purged();
                     }
                 }
             ),
         );
-        alert.present(Some(&self.page));
+        // Not the page itself, which is hidden while a note is shown on top of it.
+        alert.present(Some(&self.navigation));
     }
 
-    fn purge(self: &Rc<Self>, id: i64) {
+    /// Whether the note was deleted.
+    fn purge(self: &Rc<Self>, id: i64) -> bool {
         let result = self.store.borrow_mut().purge_note(id);
-        let message = match result {
-            Ok(()) => "Note permanently deleted".to_owned(),
-            Err(e) => format!("Could not delete note: {e}"),
+        let (message, purged) = match result {
+            Ok(()) => ("Note permanently deleted".to_owned(), true),
+            Err(e) => (format!("Could not delete note: {e}"), false),
         };
         pointer::add_toast(&self.toasts, &message);
         self.refresh();
+        purged
     }
 }

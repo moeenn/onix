@@ -8,14 +8,12 @@ use gtk::gio;
 use gtk::glib::{self, clone};
 
 use super::deleted_projects::{self, DeletedProjectsPage};
-use super::{pointer, project_dialog};
+use super::{board, pointer, project_dialog};
 use crate::db::Store;
 use crate::model::Project;
 
 /// Tag of the projects page in the navigation view, for returning to it.
 pub const PAGE_TAG: &str = "projects";
-
-const CARD_WIDTH: i32 = 240;
 
 pub struct ProjectsPage {
     store: Rc<RefCell<Store>>,
@@ -55,7 +53,7 @@ impl ProjectsPage {
         menu.append_item(&deleted_item);
         let new_button = adw::SplitButton::builder()
             .label("New Project")
-            .tooltip_text("Add a project")
+            .tooltip_text("Add a project (Ctrl+N)")
             .dropdown_tooltip("More")
             .menu_model(&menu)
             .css_classes(["suggested-action"])
@@ -63,6 +61,7 @@ impl ProjectsPage {
         // Also covers the split button's drop-down half.
         new_button.set_cursor_from_name(Some("pointer"));
         pointer::set_on_menu_items(new_button.popover());
+        pointer::mark_destructive_menu_items(new_button.popover(), &["Deleted Projects"]);
         let header = adw::HeaderBar::new();
         header.pack_start(section_menu);
         header.pack_end(&new_button);
@@ -147,6 +146,21 @@ impl ProjectsPage {
             this,
             move |_| project_dialog::open(&this, None)
         ));
+        let shortcuts = gtk::ShortcutController::new();
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("<Control>n"),
+            Some(gtk::CallbackAction::new(clone!(
+                #[weak]
+                this,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, _| {
+                    project_dialog::open(&this, None);
+                    glib::Propagation::Stop
+                }
+            ))),
+        ));
+        self.page.add_controller(shortcuts);
         // Picks up projects restored on the deleted projects page.
         self.page.connect_showing(clone!(
             #[weak]
@@ -232,6 +246,7 @@ impl ProjectsPage {
             .build();
         menu_button.set_cursor_from_name(Some("pointer"));
         pointer::set_on_menu_items(menu_button.popover());
+        pointer::mark_destructive_menu_items(menu_button.popover(), &["Delete"]);
 
         let edit = gio::SimpleAction::new("edit", None);
         edit.connect_activate(clone!(
@@ -255,7 +270,7 @@ impl ProjectsPage {
 
         let card = gtk::Box::builder()
             .spacing(8)
-            .width_request(CARD_WIDTH)
+            .width_request(board::CARD_WIDTH)
             .css_classes(["card", "activatable", "project-card"])
             .build();
         card.append(&name);

@@ -185,3 +185,8 @@ checkbutton.md-task check:checked {
   padding: 6px 10px 6px 6px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
+
+/* Menu options that delete something; see `pointer::mark_destructive_menu_items`. */
+modelbutton.destructive-menu-item {
+  color: @destructive_color;
+}

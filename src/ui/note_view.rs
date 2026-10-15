@@ -1,4 +1,5 @@
-//! Page showing a note with its details rendered, from which it can be edited or deleted.
+//! Page showing a note with its details rendered, from which it can be edited or deleted, or
+//! for a deleted note, restored.
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -18,13 +19,24 @@ use crate::model::Note;
 /// Width (px) of the search box shown over the note.
 const SEARCH_WIDTH: i32 = 280;
 
+/// What the buttons of a deleted note's view do.
+struct DeletedActions {
+    restore: Box<dyn Fn()>,
+    purge: Box<dyn Fn()>,
+}
+
 pub struct NoteView {
+    /// Empty for a deleted note, which can't be edited, deleted or reloaded from here.
     notes: Weak<NotesPage>,
+    /// Set for a deleted note, in place of editing and deleting it.
+    deleted: Option<DeletedActions>,
     /// For callbacks created after construction, such as the rendered checkboxes.
     this: Weak<Self>,
     page: adw::NavigationPage,
     edit_button: gtk::Button,
     delete_button: gtk::Button,
+    restore_button: gtk::Button,
+    purge_button: gtk::Button,
     title_label: gtk::Label,
     meta_label: gtk::Label,
     /// Holds the rendered markdown, rebuilt each time the note changes.
@@ -38,6 +50,29 @@ pub struct NoteView {
 
 impl NoteView {
     pub fn new(notes: &Rc<NotesPage>, note: Note) -> Rc<Self> {
+        Self::build(Rc::downgrade(notes), note, None)
+    }
+
+    /// A read-only view of a deleted note, with buttons that call `on_restore` and
+    /// `on_purge`.
+    pub fn deleted(
+        note: Note,
+        on_restore: impl Fn() + 'static,
+        on_purge: impl Fn() + 'static,
+    ) -> Rc<Self> {
+        let actions = DeletedActions {
+            restore: Box::new(on_restore),
+            purge: Box::new(on_purge),
+        };
+        Self::build(Weak::new(), note, Some(actions))
+    }
+
+    fn build(
+        notes: Weak<NotesPage>,
+        note: Note,
+        deleted_actions: Option<DeletedActions>,
+    ) -> Rc<Self> {
+        let deleted = deleted_actions.is_some();
         let edit_button = gtk::Button::builder()
             .label("Edit")
             .tooltip_text("Edit note (Ctrl+E)")
@@ -48,12 +83,28 @@ impl NoteView {
             .tooltip_text("Delete note")
             .css_classes(["destructive-action"])
             .build();
-        for button in [&edit_button, &delete_button] {
+        let restore_button = gtk::Button::builder()
+            .label("Restore")
+            .tooltip_text("Restore note")
+            .css_classes(["suggested-action"])
+            .build();
+        let purge_button = gtk::Button::builder()
+            .label("Delete Permanently")
+            .tooltip_text("Erase note for good")
+            .css_classes(["destructive-action"])
+            .build();
+        for button in [&edit_button, &delete_button, &restore_button, &purge_button] {
             button.set_cursor_from_name(Some("pointer"));
         }
+        edit_button.set_visible(!deleted);
+        delete_button.set_visible(!deleted);
+        restore_button.set_visible(deleted);
+        purge_button.set_visible(deleted);
         let header = adw::HeaderBar::new();
         header.pack_end(&edit_button);
+        header.pack_end(&restore_button);
         header.pack_end(&delete_button);
+        header.pack_end(&purge_button);
 
         let title_label = gtk::Label::builder()
             .wrap(true)
@@ -128,11 +179,14 @@ impl NoteView {
             .build();
 
         let this = Rc::new_cyclic(|weak| Self {
-            notes: Rc::downgrade(notes),
+            notes,
+            deleted: deleted_actions,
             this: weak.clone(),
             page,
             edit_button,
             delete_button,
+            restore_button,
+            purge_button,
             title_label,
             meta_label,
             details,
@@ -158,20 +212,41 @@ impl NoteView {
             this,
             move |_| this.confirm_delete()
         ));
+        self.restore_button.connect_clicked(clone!(
+            #[weak]
+            this,
+            move |_| {
+                if let Some(deleted) = &this.deleted {
+                    (deleted.restore)();
+                }
+            }
+        ));
+        self.purge_button.connect_clicked(clone!(
+            #[weak]
+            this,
+            move |_| {
+                if let Some(deleted) = &this.deleted {
+                    (deleted.purge)();
+                }
+            }
+        ));
         // Picks up changes made in the editor pushed on top of this page.
         self.page.connect_showing(clone!(
             #[weak]
             this,
             move |_| this.reload()
         ));
-        // Otherwise the selectable title takes the focus, which selects all of its text. The
-        // selection outlives the focus, so it is cleared too.
+        // Otherwise the first selectable label, the title or the details' first line, takes
+        // the focus, which selects all of its text. The selection outlives the focus, so it is
+        // cleared too.
         self.page.connect_shown(clone!(
             #[weak]
             this,
             move |_| {
-                this.edit_button.grab_focus();
-                this.title_label.select_region(0, 0);
+                this.main_button().grab_focus();
+                for label in this.labels() {
+                    label.select_region(0, 0);
+                }
                 // The back button is created inside libadwaita once the page is shown.
                 pointer::set_on_buttons(this.page.upcast_ref());
             }
@@ -250,15 +325,30 @@ impl NoteView {
         self.search.set_text("");
         self.search_bar.set_reveal_child(false);
         self.highlight_matches();
-        self.edit_button.grab_focus();
+        self.main_button().grab_focus();
+    }
+
+    /// Edit, or Restore for a deleted note.
+    fn main_button(&self) -> &gtk::Button {
+        if self.deleted.is_some() {
+            &self.restore_button
+        } else {
+            &self.edit_button
+        }
+    }
+
+    /// The title and every label in the rendered details.
+    fn labels(&self) -> Vec<gtk::Label> {
+        let mut labels = vec![self.title_label.clone()];
+        collect_labels(self.details.upcast_ref(), &mut labels);
+        labels
     }
 
     /// Highlights the search text in the title and details, and shows how often it occurs.
     fn highlight_matches(&self) {
         let query = self.search.text();
-        let mut labels = vec![self.title_label.clone()];
-        collect_labels(self.details.upcast_ref(), &mut labels);
-        let count: usize = labels
+        let count: usize = self
+            .labels()
             .iter()
             .map(|label| highlight(label, &query))
             .sum();
@@ -275,6 +365,9 @@ impl NoteView {
     }
 
     fn edit(&self) {
+        if self.deleted.is_some() {
+            return;
+        }
         if let Some(notes) = self.notes.upgrade() {
             notes.push_editor(Some(self.note.borrow().clone()));
         }
@@ -326,8 +419,12 @@ impl NoteView {
                     this.set_task(marker, checked);
                 }
             });
-            self.details
-                .append(&markdown_view::build(&note.detail, on_task_toggled));
+            let rendered = markdown_view::build(&note.detail, on_task_toggled);
+            if self.deleted.is_some() {
+                // A deleted note can't be changed, so its checkboxes only show their state.
+                disable_checkboxes(rendered.upcast_ref());
+            }
+            self.details.append(&rendered);
         }
         // The labels were rebuilt, so their highlights are gone.
         drop(note);
@@ -371,6 +468,21 @@ impl NoteView {
                 notes.navigation().pop_to_page(notes.page());
             }
         });
+    }
+}
+
+/// Stops the checkboxes inside `widget` from being clicked or focused, without dimming them.
+fn disable_checkboxes(widget: &gtk::Widget) {
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if current.is::<gtk::CheckButton>() {
+            current.set_can_target(false);
+            current.set_focusable(false);
+            current.set_cursor(None);
+        } else {
+            disable_checkboxes(&current);
+        }
+        child = current.next_sibling();
     }
 }
 
@@ -441,7 +553,10 @@ mod tests {
 
     #[test]
     fn find_matches_ignores_case() {
-        assert_eq!(find_matches("Note: a NOTE, notes", "note"), [0..4, 8..12, 14..18]);
+        assert_eq!(
+            find_matches("Note: a NOTE, notes", "note"),
+            [0..4, 8..12, 14..18]
+        );
         assert_eq!(find_matches("aaaa", "aa"), [0..2, 2..4]);
         assert!(find_matches("note", "").is_empty());
         assert!(find_matches("note", "budget").is_empty());

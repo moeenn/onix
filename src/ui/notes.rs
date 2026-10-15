@@ -58,7 +58,7 @@ impl NotesPage {
     ) -> Rc<Self> {
         let new_button = gtk::Button::builder()
             .label("New Note")
-            .tooltip_text("Add a note")
+            .tooltip_text("Add a note (Ctrl+N)")
             .css_classes(["suggested-action"])
             .build();
         new_button.set_cursor_from_name(Some("pointer"));
@@ -96,6 +96,7 @@ impl NotesPage {
             .build();
         menu_button.set_cursor_from_name(Some("pointer"));
         pointer::set_on_menu_items(menu_button.popover());
+        pointer::mark_destructive_menu_items(menu_button.popover(), &["Deleted Notes"]);
         search_bar.append(&menu_button);
 
         let grid = card_grid();
@@ -137,7 +138,7 @@ impl NotesPage {
             .child(&toolbar)
             .build();
 
-        let deleted = DeletedNotesPage::new(toasts, Rc::clone(&store));
+        let deleted = DeletedNotesPage::new(toasts, navigation, Rc::clone(&store));
         navigation.add(&page);
         navigation.add(deleted.page());
 
@@ -196,6 +197,19 @@ impl NotesPage {
                 glib::Propagation::Proceed,
                 move |_, _| {
                     this.focus_search();
+                    glib::Propagation::Stop
+                }
+            ))),
+        ));
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("<Control>n"),
+            Some(gtk::CallbackAction::new(clone!(
+                #[weak]
+                this,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, _| {
+                    this.open_editor(None);
                     glib::Propagation::Stop
                 }
             ))),
@@ -529,6 +543,7 @@ pub fn note_card(note: &Note, meta: Option<&str>, menu: &gio::Menu) -> gtk::Box 
         .build();
     menu_button.set_cursor_from_name(Some("pointer"));
     pointer::set_on_menu_items(menu_button.popover());
+    pointer::mark_destructive_menu_items(menu_button.popover(), &["Delete"]);
 
     let card = gtk::Box::builder()
         .spacing(8)
