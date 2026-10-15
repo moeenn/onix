@@ -449,6 +449,13 @@ impl Board {
                     glib::Propagation::Stop
                 }
                 // Stopped even at the board's edges, so the focus stays on the cards.
+                _ if state.contains(gdk::ModifierType::CONTROL_MASK)
+                    && is_plain(state.difference(gdk::ModifierType::CONTROL_MASK))
+                    && let Some(direction) = direction(key) =>
+                {
+                    board.move_card(id, direction);
+                    glib::Propagation::Stop
+                }
                 _ if is_plain(state)
                     && let Some(direction) = direction(key) =>
                 {
@@ -544,6 +551,68 @@ impl Board {
         };
         if let Some((column, next)) = next {
             self.focus_card(column, &next);
+        }
+    }
+
+    /// Moves the ticket `id` one place in `direction`: past the card shown above or below it,
+    /// or into the next column to the side at the same height. Its card keeps the focus.
+    fn move_card(self: &Rc<Self>, id: i64, direction: gtk::DirectionType) {
+        let Some((column, position)) = self.columns.iter().enumerate().find_map(|(i, column)| {
+            let position = column
+                .entries
+                .borrow()
+                .iter()
+                .position(|(_, t)| t.id == id)?;
+            Some((i, position))
+        }) else {
+            return;
+        };
+        // Positions among all of a column's tickets, as the search may hide some of them.
+        let visible: Vec<usize> = {
+            let entries = self.columns[column].entries.borrow();
+            (0..entries.len())
+                .filter(|&i| entries[i].0.is_visible())
+                .collect()
+        };
+        let row = visible.iter().position(|&i| i == position).unwrap_or(0);
+        // Indexes count the column's tickets without the moved one, as `move_ticket` does.
+        let target = match direction {
+            gtk::DirectionType::Up => row.checked_sub(1).map(|r| (column, visible[r])),
+            gtk::DirectionType::Down => visible.get(row + 1).map(|&i| (column, i)),
+            gtk::DirectionType::Left => column.checked_sub(1).map(|c| (c, self.side_index(c, row))),
+            gtk::DirectionType::Right => (column + 1 < self.columns.len())
+                .then(|| (column + 1, self.side_index(column + 1, row))),
+            _ => None,
+        };
+        let Some((column, index)) = target else {
+            return;
+        };
+        let status = self.columns[column].status;
+        let result = self.store.borrow_mut().move_ticket(id, status, index);
+        if let Err(e) = result {
+            self.toast(&format!("Could not move ticket: {e}"));
+            return;
+        }
+        self.refresh();
+        let card = self.columns[column]
+            .entries
+            .borrow()
+            .iter()
+            .find(|(_, t)| t.id == id)
+            .map(|(card, _)| card.clone());
+        if let Some(card) = card {
+            self.focus_card(column, &card);
+        }
+    }
+
+    /// Where a ticket moved sideways into the column at `column` goes, to sit at `row` among
+    /// its shown cards: before the card now there, or after the last one shown.
+    fn side_index(&self, column: usize, row: usize) -> usize {
+        let entries = self.columns[column].entries.borrow();
+        let mut visible = (0..entries.len()).filter(|&i| entries[i].0.is_visible());
+        match visible.clone().nth(row) {
+            Some(i) => i,
+            None => visible.next_back().map_or(entries.len(), |i| i + 1),
         }
     }
 
