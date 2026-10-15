@@ -396,6 +396,7 @@ impl Board {
     fn build_card(self: &Rc<Self>, ticket: &Ticket) -> gtk::Widget {
         let board = Rc::clone(self);
         let id = ticket.id;
+        let status = ticket.status;
 
         // A tiny max width lets the label wrap to the column instead of widening it.
         let title = gtk::Label::builder()
@@ -446,6 +447,13 @@ impl Board {
             move |_, key, _, state| match key {
                 gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::space => {
                     board.open_ticket(id);
+                    glib::Propagation::Stop
+                }
+                _ if is_plain(state.difference(gdk::ModifierType::CONTROL_MASK))
+                    && state.contains(gdk::ModifierType::CONTROL_MASK)
+                    && key.to_lower() == gdk::Key::n =>
+                {
+                    dialog::open(&board, Target::New(status));
                     glib::Propagation::Stop
                 }
                 // Stopped even at the board's edges, so the focus stays on the cards.

@@ -68,11 +68,11 @@ impl TicketDialog {
     fn new(this: Weak<Self>, board: &Rc<Board>, status: Status, ticket: Option<Ticket>) -> Self {
         let edit_button = gtk::Button::builder()
             .label("Edit")
-            .tooltip_text("Edit (Ctrl+E)")
+            .tooltip_text("Edit (E)")
             .build();
         let delete_button = gtk::Button::builder()
             .label("Delete")
-            .tooltip_text("Delete ticket")
+            .tooltip_text("Delete ticket (Delete)")
             .css_classes(["destructive-action"])
             .build();
         let cancel_button = gtk::Button::with_label("Cancel");
@@ -294,8 +294,9 @@ impl TicketDialog {
                 }
             ))),
         ));
+        // Plain keys only act on the preview, so they still reach the editor's fields.
         shortcuts.add_shortcut(gtk::Shortcut::new(
-            gtk::ShortcutTrigger::parse_string("<Control>e"),
+            gtk::ShortcutTrigger::parse_string("<Control>e|e"),
             Some(gtk::CallbackAction::new(clone!(
                 #[weak]
                 this,
@@ -306,6 +307,22 @@ impl TicketDialog {
                         return glib::Propagation::Proceed;
                     }
                     this.show_editor();
+                    glib::Propagation::Stop
+                }
+            ))),
+        ));
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("Delete|KP_Delete"),
+            Some(gtk::CallbackAction::new(clone!(
+                #[weak]
+                this,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, _| {
+                    if this.is_editing() {
+                        return glib::Propagation::Proceed;
+                    }
+                    this.confirm_delete();
                     glib::Propagation::Stop
                 }
             ))),
@@ -471,9 +488,11 @@ impl TicketDialog {
                 self.show_preview(&ticket);
                 *self.ticket.borrow_mut() = Some(ticket);
             }
-            Ok(_) => {
-                self.dialog.set_can_close(true);
-                self.dialog.close();
+            // A new ticket stays open in the editor, now editing the saved ticket.
+            Ok(ticket) => {
+                self.dialog.set_title(&format!("Edit #{}", ticket.id));
+                *self.ticket.borrow_mut() = Some(ticket);
+                self.update_editor_state();
             }
             Err(e) => pointer::add_toast(&self.toasts, &format!("Could not save: {e}")),
         }
