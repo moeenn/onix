@@ -6,13 +6,17 @@ use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
 use gtk::glib::{self, clone};
+use gtk::pango;
 
 use super::dialog::format_time;
 use super::markdown_view;
-use super::pointer;
 use super::notes::{NotesPage, display_title};
+use super::pointer;
 use crate::markdown;
 use crate::model::Note;
+
+/// Width (px) of the search box shown over the note.
+const SEARCH_WIDTH: i32 = 280;
 
 pub struct NoteView {
     notes: Weak<NotesPage>,
@@ -25,6 +29,10 @@ pub struct NoteView {
     meta_label: gtk::Label,
     /// Holds the rendered markdown, rebuilt each time the note changes.
     details: gtk::Box,
+    /// Holds the search entry in the top-right corner, revealed by Ctrl+F.
+    search_bar: gtk::Revealer,
+    search: gtk::SearchEntry,
+    match_count: gtk::Label,
     note: RefCell<Note>,
 }
 
@@ -85,9 +93,35 @@ impl NoteView {
             .child(&clamp)
             .build();
 
+        let search = gtk::SearchEntry::builder()
+            .placeholder_text("Find in note")
+            .hexpand(true)
+            .build();
+        let match_count = gtk::Label::builder()
+            .visible(false)
+            .css_classes(["dim-label", "caption", "numeric"])
+            .build();
+        let search_box = gtk::Box::builder()
+            .spacing(8)
+            .width_request(SEARCH_WIDTH)
+            .css_classes(["card", "note-search"])
+            .build();
+        search_box.append(&search);
+        search_box.append(&match_count);
+        let search_bar = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::Crossfade)
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::Start)
+            .margin_top(12)
+            .margin_end(12)
+            .child(&search_box)
+            .build();
+        let overlay = gtk::Overlay::builder().child(&scroller).build();
+        overlay.add_overlay(&search_bar);
+
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&header);
-        toolbar.set_content(Some(&scroller));
+        toolbar.set_content(Some(&overlay));
         let page = adw::NavigationPage::builder()
             .title("Note")
             .child(&toolbar)
@@ -102,6 +136,9 @@ impl NoteView {
             title_label,
             meta_label,
             details,
+            search_bar,
+            search,
+            match_count,
             note: RefCell::new(note),
         });
         this.connect_signals();
@@ -154,7 +191,83 @@ impl NoteView {
                 }
             ))),
         ));
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("<Control>f"),
+            Some(gtk::CallbackAction::new(clone!(
+                #[weak]
+                this,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, _| {
+                    this.open_search();
+                    glib::Propagation::Stop
+                }
+            ))),
+        ));
         self.page.add_controller(shortcuts);
+
+        // Capture phase, so Escape closes an open search before the navigation view sees it
+        // and goes back, wherever the focus is on the page.
+        let escape = gtk::ShortcutController::new();
+        escape.set_propagation_phase(gtk::PropagationPhase::Capture);
+        escape.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("Escape"),
+            Some(gtk::CallbackAction::new(clone!(
+                #[weak]
+                this,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, _| {
+                    if !this.search_bar.reveals_child() {
+                        return glib::Propagation::Proceed;
+                    }
+                    this.close_search();
+                    glib::Propagation::Stop
+                }
+            ))),
+        ));
+        self.page.add_controller(escape);
+
+        self.search.connect_search_changed(clone!(
+            #[weak]
+            this,
+            move |_| this.highlight_matches()
+        ));
+        // Also closed by the Escape shortcut above, before the entry sees the key.
+        self.search.connect_stop_search(clone!(
+            #[weak]
+            this,
+            move |_| this.close_search()
+        ));
+    }
+
+    fn open_search(&self) {
+        self.search_bar.set_reveal_child(true);
+        self.search.grab_focus();
+    }
+
+    fn close_search(&self) {
+        self.search.set_text("");
+        self.search_bar.set_reveal_child(false);
+        self.highlight_matches();
+        self.edit_button.grab_focus();
+    }
+
+    /// Highlights the search text in the title and details, and shows how often it occurs.
+    fn highlight_matches(&self) {
+        let query = self.search.text();
+        let mut labels = vec![self.title_label.clone()];
+        collect_labels(self.details.upcast_ref(), &mut labels);
+        let count: usize = labels
+            .iter()
+            .map(|label| highlight(label, &query))
+            .sum();
+        self.match_count.set_label(&match count {
+            0 => "No matches".to_owned(),
+            1 => "1 match".to_owned(),
+            n => format!("{n} matches"),
+        });
+        self.match_count.set_visible(!query.is_empty());
     }
 
     pub fn page(&self) -> &adw::NavigationPage {
@@ -216,6 +329,9 @@ impl NoteView {
             self.details
                 .append(&markdown_view::build(&note.detail, on_task_toggled));
         }
+        // The labels were rebuilt, so their highlights are gone.
+        drop(note);
+        self.highlight_matches();
     }
 
     /// Saves a checkbox clicked in the details by rewriting its marker in the markdown.
@@ -255,5 +371,89 @@ impl NoteView {
                 notes.navigation().pop_to_page(notes.page());
             }
         });
+    }
+}
+
+/// Adds every label inside `widget` to `labels`.
+fn collect_labels(widget: &gtk::Widget, labels: &mut Vec<gtk::Label>) {
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(label) = current.downcast_ref::<gtk::Label>() {
+            labels.push(label.clone());
+        } else {
+            collect_labels(&current, labels);
+        }
+        child = current.next_sibling();
+    }
+}
+
+/// Highlights the occurrences of `query` in `label`'s text, returning how many there are.
+/// These attributes are merged with the label's markup rather than replacing it.
+fn highlight(label: &gtk::Label, query: &str) -> usize {
+    let matches = find_matches(&label.text(), query);
+    if matches.is_empty() {
+        label.set_attributes(None);
+        return 0;
+    }
+    let attributes = pango::AttrList::new();
+    for range in &matches {
+        let (start, end) = (range.start as u32, range.end as u32);
+        let mut background = pango::AttrColor::new_background(0xf6f6, 0xd3d3, 0x2d2d);
+        background.set_start_index(start);
+        background.set_end_index(end);
+        attributes.insert(background);
+        // Dark text, so the highlight stays readable in the dark style too.
+        let mut foreground = pango::AttrColor::new_foreground(0, 0, 0);
+        foreground.set_start_index(start);
+        foreground.set_end_index(end);
+        attributes.insert(foreground);
+    }
+    label.set_attributes(Some(&attributes));
+    matches.len()
+}
+
+/// Byte ranges in `text` of the non-overlapping, case-insensitive occurrences of `query`.
+fn find_matches(text: &str, query: &str) -> Vec<Range<usize>> {
+    let query: String = query.chars().flat_map(char::to_lowercase).collect();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    // Lowercasing can change a character's length, so each byte of the lowercased text
+    // records where its character starts in `text`.
+    let mut lowered = String::with_capacity(text.len());
+    let mut origins = Vec::with_capacity(text.len());
+    for (index, c) in text.char_indices() {
+        for lower in c.to_lowercase() {
+            lowered.push(lower);
+            origins.resize(lowered.len(), index);
+        }
+    }
+    let origin = |at: usize| origins.get(at).copied().unwrap_or(text.len());
+    lowered
+        .match_indices(&query)
+        .map(|(start, found)| origin(start)..origin(start + found.len()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_matches;
+
+    #[test]
+    fn find_matches_ignores_case() {
+        assert_eq!(find_matches("Note: a NOTE, notes", "note"), [0..4, 8..12, 14..18]);
+        assert_eq!(find_matches("aaaa", "aa"), [0..2, 2..4]);
+        assert!(find_matches("note", "").is_empty());
+        assert!(find_matches("note", "budget").is_empty());
+    }
+
+    #[test]
+    fn find_matches_returns_ranges_in_the_original_text() {
+        // "İ" lowercases to two characters, which must not shift the later match.
+        let text = "İ Straße STRASSE";
+        let found = find_matches(text, "straße");
+        assert_eq!(found.len(), 1);
+        assert_eq!(&text[found[0].clone()], "Straße");
+        assert_eq!(&text[find_matches(text, "i̇")[0].clone()], "İ");
     }
 }

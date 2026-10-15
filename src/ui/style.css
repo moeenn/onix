@@ -179,3 +179,9 @@ checkbutton.md-task check:checked {
 .note-snippet {
   line-height: 1.25;
 }
+
+/* Floats over the note, so it gets a shadow to stand apart from the text below. */
+.note-search {
+  padding: 6px 10px 6px 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
