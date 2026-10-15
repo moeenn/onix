@@ -65,6 +65,13 @@ impl DeletedProjectsPage {
         // The back button is built by libadwaita.
         page.connect_shown(|page| pointer::set_on_buttons(page.upcast_ref()));
 
+        let shortcuts = gtk::ShortcutController::new();
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("<Alt>Left"),
+            Some(gtk::NamedAction::new("navigation.pop")),
+        ));
+        page.add_controller(shortcuts);
+
         let this = Rc::new(Self {
             store,
             toasts: toasts.clone(),

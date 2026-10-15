@@ -9,11 +9,13 @@ use gtk::{gdk, gio, graphene};
 
 use super::deleted_tickets::DeletedTicketsPage;
 use super::dialog::{self, Target};
-use super::pointer;
+use super::{pointer, projects};
 use crate::db::Store;
 use crate::model::{Project, Status, Ticket};
 
 const COLUMN_WIDTH: i32 = 400;
+/// Longer titles are cut short on the cards, with an ellipsis.
+const CARD_TITLE_MAX_CHARS: usize = 90;
 const SEARCH_DEBOUNCE_MS: u32 = 250;
 
 struct Column {
@@ -127,7 +129,7 @@ impl Board {
 
         // GtkSearchEntry emits `search-changed` only after `search-delay` ms without typing.
         let search = gtk::SearchEntry::builder()
-            .placeholder_text("Search tickets by title or details…")
+            .placeholder_text("Press / to search")
             .search_delay(SEARCH_DEBOUNCE_MS)
             .hexpand(true)
             .build();
@@ -216,6 +218,37 @@ impl Board {
             }
         ));
         search.connect_stop_search(|entry| entry.set_text(""));
+
+        // Bubble phase, so a "/" typed into a text field still reaches that field first.
+        let shortcuts = gtk::ShortcutController::new();
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("slash"),
+            Some(gtk::CallbackAction::new(clone!(
+                #[weak]
+                board,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, _| {
+                    board.focus_search();
+                    glib::Propagation::Stop
+                }
+            ))),
+        ));
+        // Popped directly, since the page itself can't be popped.
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("<Alt>Left"),
+            Some(gtk::CallbackAction::new(clone!(
+                #[weak]
+                board,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, _| {
+                    board.navigation.pop_to_tag(projects::PAGE_TAG);
+                    glib::Propagation::Stop
+                }
+            ))),
+        ));
+        self.page.add_controller(shortcuts);
 
         let deleted_tickets = gio::SimpleAction::new("deleted-tickets", None);
         deleted_tickets.connect_activate(clone!(
@@ -323,7 +356,7 @@ impl Board {
 
         // A tiny max width lets the label wrap to the column instead of widening it.
         let title = gtk::Label::builder()
-            .label(&ticket.title)
+            .label(truncate(&ticket.title, CARD_TITLE_MAX_CHARS))
             .wrap(true)
             .wrap_mode(gtk::pango::WrapMode::WordChar)
             .max_width_chars(1)
@@ -601,9 +634,20 @@ impl Board {
     }
 }
 
+/// `text` cut to at most `max` characters, the last of them an ellipsis when it was cut.
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(max - 1).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('…');
+    cut
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Board;
+    use super::{truncate, Board};
     use crate::model::{Status, Ticket};
 
     #[test]
@@ -624,5 +668,16 @@ mod tests {
             "no fuzzy subsequence matches"
         );
         assert!(!Board::matches(&ticket, "deploy"));
+    }
+
+    #[test]
+    fn truncate_caps_length_with_ellipsis() {
+        assert_eq!(truncate("short", 90), "short");
+        let exact = "a".repeat(90);
+        assert_eq!(truncate(&exact, 90), exact);
+        let cut = truncate(&"é".repeat(100), 90);
+        assert_eq!(cut.chars().count(), 90);
+        assert!(cut.ends_with('…'));
+        assert_eq!(truncate("abc def", 5), "abc…");
     }
 }
