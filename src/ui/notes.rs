@@ -8,7 +8,6 @@ use gtk::gio;
 use gtk::glib::{self, clone};
 
 use super::deleted_notes::{self, DeletedNotesPage};
-use super::dialog::format_time;
 use super::note_editor::NoteEditor;
 use super::note_view::NoteView;
 use super::pointer;
@@ -18,7 +17,8 @@ use crate::model::Note;
 /// Tag of the notes page in the navigation view, for returning to it.
 pub const PAGE_TAG: &str = "notes";
 
-const CARD_WIDTH: i32 = 260;
+/// Matches the width of the columns on a project's board.
+const CARD_WIDTH: i32 = 400;
 const SEARCH_DEBOUNCE_MS: u32 = 250;
 /// How much of a note's detail its card shows.
 const PREVIEW_CHARS: usize = 60;
@@ -68,7 +68,7 @@ impl NotesPage {
 
         // GtkSearchEntry emits `search-changed` only after `search-delay` ms without typing.
         let search = gtk::SearchEntry::builder()
-            .placeholder_text("Search notes by title or details…")
+            .placeholder_text("Press / to search notes")
             .search_delay(SEARCH_DEBOUNCE_MS)
             .hexpand(true)
             .build();
@@ -184,6 +184,23 @@ impl NotesPage {
             }
         ));
         self.search.connect_stop_search(|entry| entry.set_text(""));
+
+        // Bubble phase, so a "/" typed into a text field still reaches that field first.
+        let shortcuts = gtk::ShortcutController::new();
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("slash"),
+            Some(gtk::CallbackAction::new(clone!(
+                #[weak]
+                this,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, _| {
+                    this.focus_search();
+                    glib::Propagation::Stop
+                }
+            ))),
+        ));
+        self.page.add_controller(shortcuts);
         // Picks up notes restored on the deleted notes page.
         self.page.connect_showing(clone!(
             #[weak]
@@ -350,11 +367,7 @@ impl NotesPage {
         let actions = gio::SimpleActionGroup::new();
         actions.add_action(&delete);
 
-        let card = note_card(
-            note,
-            &format!("Updated {}", format_time(note.updated_at)),
-            &menu,
-        );
+        let card = note_card(note, None, &menu);
         card.add_css_class("activatable");
         card.insert_action_group("note", Some(&actions));
         card.upcast()
@@ -456,8 +469,8 @@ pub fn card_grid() -> gtk::FlowBox {
 }
 
 /// A card with the note's title in bold (if it has one), the start of its detail, a `meta`
-/// caption, and a menu of `menu`'s options.
-pub fn note_card(note: &Note, meta: &str, menu: &gio::Menu) -> gtk::Box {
+/// caption (if given), and a menu of `menu`'s options.
+pub fn note_card(note: &Note, meta: Option<&str>, menu: &gio::Menu) -> gtk::Box {
     let text = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
@@ -496,13 +509,15 @@ pub fn note_card(note: &Note, meta: &str, menu: &gio::Menu) -> gtk::Box {
     detail.set_yalign(0.0);
     detail.add_css_class("note-snippet");
     text.append(&detail);
-    let meta = gtk::Label::builder()
-        .label(meta)
-        .xalign(0.0)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .css_classes(["dim-label", "caption"])
-        .build();
-    text.append(&meta);
+    if let Some(meta) = meta {
+        let meta = gtk::Label::builder()
+            .label(meta)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["dim-label", "caption"])
+            .build();
+        text.append(&meta);
+    }
 
     // A text label rather than an icon, so the button shows regardless of icon theme.
     let menu_button = gtk::MenuButton::builder()

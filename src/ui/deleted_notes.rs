@@ -86,7 +86,7 @@ impl DeletedNotesPage {
         for (note, deleted_at) in &notes {
             let card = note_card(
                 note,
-                &format!("Deleted {}", format_time(*deleted_at)),
+                Some(&format!("Deleted {}", format_time(*deleted_at))),
                 &Self::build_menu(note),
             );
             let child = gtk::FlowBoxChild::builder()

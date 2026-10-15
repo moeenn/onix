@@ -9,6 +9,7 @@ use gtk::glib::{self, clone};
 
 use super::dialog::format_time;
 use super::markdown_view;
+use super::pointer;
 use super::notes::{NotesPage, display_title};
 use crate::markdown;
 use crate::model::Note;
@@ -126,12 +127,16 @@ impl NoteView {
             this,
             move |_| this.reload()
         ));
-        // Otherwise the selectable title takes the focus, which selects all of its text.
+        // Otherwise the selectable title takes the focus, which selects all of its text. The
+        // selection outlives the focus, so it is cleared too.
         self.page.connect_shown(clone!(
             #[weak]
             this,
             move |_| {
                 this.edit_button.grab_focus();
+                this.title_label.select_region(0, 0);
+                // The back button is created inside libadwaita once the page is shown.
+                pointer::set_on_buttons(this.page.upcast_ref());
             }
         ));
 

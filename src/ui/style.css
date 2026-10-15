@@ -171,8 +171,9 @@ checkbutton.md-task check:checked {
   border-radius: 6px;
 }
 
+/* Same as `.ticket`, so note cards match the board's cards. */
 .note-card {
-  padding: 12px 6px 10px 16px;
+  padding: 14px 16px;
 }
 
 .note-snippet {
