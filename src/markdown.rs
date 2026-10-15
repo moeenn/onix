@@ -35,6 +35,8 @@ pub enum Block {
     /// Monospace markup with columns already aligned.
     Table(String),
     Rule,
+    /// Blank lines between blocks, which markdown would otherwise collapse into a small gap.
+    Space(usize),
 }
 
 #[derive(Debug, Default)]
@@ -69,7 +71,33 @@ pub fn parse(markdown: &str) -> Vec<Block> {
         ..Builder::default()
     };
 
+    // Nesting depth of the events, and where the last top-level block ended.
+    let mut depth = 0usize;
+    let mut block_end: Option<usize> = None;
     for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
+        let top_level = depth == 0 && matches!(event, Event::Start(_) | Event::Rule);
+        if top_level
+            && let Some(end) = block_end
+            && let Some(lines) = blank_lines(markdown, end, range.start)
+        {
+            builder.add_block(Block::Space(lines));
+        }
+        let ends_block = match &event {
+            Event::Start(_) => {
+                depth += 1;
+                false
+            }
+            Event::End(_) => {
+                depth = depth.saturating_sub(1);
+                depth == 0
+            }
+            Event::Rule => depth == 0,
+            _ => false,
+        };
+        // Some ranges, like a list's, take in the blank lines after the block.
+        if ends_block {
+            block_end = markdown.get(..range.end).map(|text| text.trim_end().len());
+        }
         builder.event(event, range);
     }
 
@@ -80,6 +108,20 @@ pub fn parse(markdown: &str) -> Vec<Block> {
         Some(Container::Root(blocks)) => blocks,
         _ => Vec::new(),
     }
+}
+
+/// Blank lines between a block whose text ends at `end` and one starting at `start`, or
+/// `None` if there are none or the gap holds more than whitespace.
+fn blank_lines(markdown: &str, end: usize, start: usize) -> Option<usize> {
+    let gap = markdown.get(end..start)?;
+    if !gap.trim().is_empty() {
+        return None;
+    }
+    // The first newline ends the block's last line; each one after it is a blank line.
+    gap.matches('\n')
+        .count()
+        .checked_sub(1)
+        .filter(|&lines| lines > 0)
 }
 
 fn escape(text: &str) -> String {
@@ -485,6 +527,13 @@ fn render_table(table: &Table) -> String {
 mod tests {
     use super::{Block, parse};
 
+    /// Parses `markdown`, leaving out the space for blank lines.
+    fn parse_content(markdown: &str) -> Vec<Block> {
+        let mut blocks = parse(markdown);
+        blocks.retain(|block| !matches!(block, Block::Space(_)));
+        blocks
+    }
+
     /// `<a href>` is a GtkLabel extension, so links are stripped before asking Pango.
     fn assert_valid_markup(markup: &str) {
         let mut plain = String::new();
@@ -509,7 +558,7 @@ mod tests {
                 Block::Code { markup, .. } => assert_valid_markup(markup),
                 Block::Quote { blocks, .. } => assert_all_valid(blocks),
                 Block::List { items, .. } => items.iter().for_each(|i| assert_all_valid(&i.blocks)),
-                Block::Rule => {}
+                Block::Rule | Block::Space(_) => {}
             }
         }
     }
@@ -528,9 +577,32 @@ mod tests {
     }
 
     #[test]
+    fn keeps_blank_lines_between_blocks() {
+        let blocks = parse("a\n\n\n\nb\n\nc\n- x\n\n\n# H");
+        let [
+            Block::Paragraph(_),
+            Block::Space(3),
+            Block::Paragraph(_),
+            Block::Space(1),
+            Block::Paragraph(_),
+            Block::List { .. },
+            Block::Space(2),
+            Block::Heading(..),
+        ] = blocks.as_slice()
+        else {
+            panic!("{blocks:?}")
+        };
+        let blocks = parse("```\ncode\n\n\nmore\n```");
+        assert!(
+            matches!(blocks.as_slice(), [Block::Code { .. }]),
+            "{blocks:?}"
+        );
+    }
+
+    #[test]
     fn single_newlines_are_line_breaks() {
         let blocks = parse("first line\nsecond line\n\nnext paragraph");
-        let [Block::Paragraph(a), Block::Paragraph(b)] = blocks.as_slice() else {
+        let [Block::Paragraph(a), Block::Space(1), Block::Paragraph(b)] = blocks.as_slice() else {
             panic!("{blocks:?}")
         };
         assert_eq!(a, "first line\nsecond line");
@@ -539,7 +611,8 @@ mod tests {
 
     #[test]
     fn builds_nested_and_task_lists() {
-        let blocks = parse("- [x] done\n- [ ] todo\n  1. nested\n  2. list\n\n3. three\n4. four");
+        let blocks =
+            parse_content("- [x] done\n- [ ] todo\n  1. nested\n  2. list\n\n3. three\n4. four");
         let [
             Block::List { start: None, items },
             Block::List {
@@ -572,7 +645,7 @@ mod tests {
         let md = "# Title\n\nIntro with https://example.com/a_b?x=1&y=2.\n\n\
                   > quoted <tag>\n\n```rust\nfn main() {}\n```\n\n\
                   | a | b |\n|:-|-:|\n| 1 | **22** |\n\n---\n\n![alt](img.png) [link](https://x.y)";
-        let blocks = parse(md);
+        let blocks = parse_content(md);
         assert!(matches!(blocks[0], Block::Heading(1, _)));
         let Block::Paragraph(intro) = &blocks[1] else {
             panic!("{blocks:?}")

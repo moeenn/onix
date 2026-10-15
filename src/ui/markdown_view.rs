@@ -36,6 +36,8 @@ fn append_blocks(container: &gtk::Box, blocks: &[Block], on_task_toggled: &OnTas
         widget.set_margin_top(match (previous, block) {
             (None, _) => 0,
             (Some(Block::Heading(..)), _) => GAP_AFTER_HEADING,
+            // The space already stands in for the gap.
+            (Some(Block::Space(_)), _) => 0,
             (Some(_), Block::Heading(..)) => GAP_BEFORE_HEADING,
             _ => GAP_BETWEEN_BLOCKS,
         });
@@ -115,6 +117,8 @@ fn block_widget(block: &Block, on_task_toggled: &OnTaskToggled) -> gtk::Widget {
                 .upcast()
         }
         Block::Rule => gtk::Separator::new(gtk::Orientation::Horizontal).upcast(),
+        // Empty lines of text, so the space matches the label's font.
+        Block::Space(lines) => gtk::Label::new(Some(&"\n".repeat(lines - 1))).upcast(),
     }
 }
 

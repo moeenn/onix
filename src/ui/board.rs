@@ -647,7 +647,7 @@ fn truncate(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{truncate, Board};
+    use super::{Board, truncate};
     use crate::model::{Status, Ticket};
 
     #[test]
