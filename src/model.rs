@@ -58,6 +58,8 @@ pub struct Ticket {
     pub details: String,
     pub status: Status,
     pub created_at: DateTime<Utc>,
+    /// Kept up to date in the database, though the UI no longer shows it.
+    #[allow(dead_code)]
     pub updated_at: DateTime<Utc>,
 }
 

@@ -74,6 +74,35 @@ dialog.alert .response-area > button {
   box-shadow: 0 6px 0 -2px @accent_bg_color;
 }
 
+/* Ticket status in the preview; the status's stored value is the color class. */
+.status-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: white;
+}
+
+.status-pill.completed {
+  background-color: #26a269;
+}
+
+.status-pill.review {
+  background-color: #8ff0a4;
+  color: rgba(0, 0, 0, 0.8);
+}
+
+.status-pill.in-progress {
+  background-color: #3584e4;
+}
+
+.status-pill.ready {
+  background-color: #f6d32d;
+  color: rgba(0, 0, 0, 0.8);
+}
+
+.status-pill.backlog {
+  background-color: #77767b;
+}
+
 .ticket-editor {
   font-family: monospace;
   font-size: 11.5pt;

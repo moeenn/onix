@@ -378,9 +378,14 @@ impl Board {
         click.connect_released(clone!(
             #[weak]
             board,
+            #[weak]
+            card,
             move |gesture, n_press, _, _| {
                 if n_press == 1 {
                     gesture.set_state(gtk::EventSequenceState::Claimed);
+                    // The dialog hands focus back to what had it when it opened; without this
+                    // that may be a widget in another column, which the board scrolls to.
+                    card.grab_focus();
                     board.open_ticket(id);
                 }
             }

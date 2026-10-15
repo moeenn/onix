@@ -33,7 +33,8 @@ struct TicketDialog {
     stack: gtk::Stack,
     toasts: adw::ToastOverlay,
     title_label: gtk::Label,
-    meta_label: gtk::Label,
+    status_pill: gtk::Label,
+    created_label: gtk::Label,
     /// Holds the rendered markdown, rebuilt each time the preview is shown.
     details: gtk::Box,
     title_row: adw::EntryRow,
@@ -97,11 +98,18 @@ impl TicketDialog {
             .selectable(true)
             .css_classes(["title-2"])
             .build();
-        let meta_label = gtk::Label::builder()
-            .wrap(true)
-            .xalign(0.0)
+        let status_pill = gtk::Label::builder()
+            .valign(gtk::Align::Center)
+            .css_classes(["status-pill", "caption-heading"])
+            .build();
+        let created_label = gtk::Label::builder()
+            .hexpand(true)
+            .xalign(1.0)
             .css_classes(["dim-label", "caption"])
             .build();
+        let meta_row = gtk::Box::builder().spacing(12).build();
+        meta_row.append(&status_pill);
+        meta_row.append(&created_label);
         let details = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .css_classes(["ticket-preview"])
@@ -115,7 +123,7 @@ impl TicketDialog {
             .margin_bottom(24)
             .build();
         preview_box.append(&title_label);
-        preview_box.append(&meta_label);
+        preview_box.append(&meta_row);
         preview_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         preview_box.append(&details);
         let preview = gtk::ScrolledWindow::builder()
@@ -211,7 +219,8 @@ impl TicketDialog {
             stack,
             toasts,
             title_label,
-            meta_label,
+            status_pill,
+            created_label,
             details,
             title_row,
             details_buffer,
@@ -329,7 +338,14 @@ impl TicketDialog {
         self.dialog
             .set_title(&format!("#{} · {}", ticket.id, ticket.status.label()));
         self.title_label.set_label(&ticket.title);
-        self.meta_label.set_label(&meta_text(ticket));
+        self.status_pill.set_label(ticket.status.label());
+        self.status_pill.set_css_classes(&[
+            "status-pill",
+            "caption-heading",
+            ticket.status.as_str(),
+        ]);
+        self.created_label
+            .set_label(&format!("Created {}", format_time(ticket.created_at)));
         while let Some(child) = self.details.first_child() {
             self.details.remove(&child);
         }
@@ -372,10 +388,7 @@ impl TicketDialog {
         };
         let details = markdown::set_task(&ticket.details, marker, checked);
         match board.update_ticket(ticket.id, &ticket.title, &details) {
-            Ok(updated) => {
-                self.meta_label.set_label(&meta_text(&updated));
-                *self.ticket.borrow_mut() = Some(updated);
-            }
+            Ok(updated) => *self.ticket.borrow_mut() = Some(updated),
             Err(e) => {
                 pointer::add_toast(&self.toasts, &format!("Could not update task: {e}"));
                 // Re-render from the stored ticket so the checkbox shows the saved state.
@@ -672,15 +685,6 @@ pub(super) fn set_tab_width(view: &gtk::TextView, chars: usize) {
     let mut tabs = gtk::pango::TabArray::new(1, true);
     tabs.set_tab(0, gtk::pango::TabAlign::Left, width);
     view.set_tabs(&tabs);
-}
-
-fn meta_text(ticket: &Ticket) -> String {
-    format!(
-        "{} · Created {} · Updated {}",
-        ticket.status.label(),
-        format_time(ticket.created_at),
-        format_time(ticket.updated_at),
-    )
 }
 
 pub fn format_time(time: DateTime<Utc>) -> String {
