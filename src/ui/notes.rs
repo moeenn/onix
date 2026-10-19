@@ -506,16 +506,21 @@ pub fn card_grid() -> gtk::FlowBox {
         .build()
 }
 
-/// Calls `on_delete` with the index of the grid's focused card when Delete is pressed.
+/// Calls `on_delete` with the index of the grid's focused card when Delete is pressed, with
+/// the focus on the card or on a button inside it.
 pub fn delete_key_controller(on_delete: impl Fn(usize) + 'static) -> gtk::EventControllerKey {
     let keys = gtk::EventControllerKey::new();
     keys.connect_key_pressed(move |keys, key, _, state| {
         if !is_plain(state) || !matches!(key, gdk::Key::Delete | gdk::Key::KP_Delete) {
             return glib::Propagation::Proceed;
         }
-        let index = keys
-            .widget()
-            .and_then(|grid| grid.focus_child())
+        let grid = keys.widget();
+        let index = grid
+            .as_ref()
+            .and_then(|grid| grid.root())
+            .and_then(|root| root.focus())
+            .and_then(|focus| focus.ancestor(gtk::FlowBoxChild::static_type()))
+            .filter(|child| child.parent() == grid)
             .and_downcast::<gtk::FlowBoxChild>()
             .and_then(|child| usize::try_from(child.index()).ok());
         match index {
@@ -527,6 +532,19 @@ pub fn delete_key_controller(on_delete: impl Fn(usize) + 'static) -> gtk::EventC
         }
     });
     keys
+}
+
+/// The grid's cards, in order.
+pub fn grid_cards(grid: &gtk::FlowBox) -> Vec<gtk::FlowBoxChild> {
+    let mut cards = Vec::new();
+    let mut child = grid.first_child();
+    while let Some(current) = child {
+        child = current.next_sibling();
+        if let Ok(card) = current.downcast::<gtk::FlowBoxChild>() {
+            cards.push(card);
+        }
+    }
+    cards
 }
 
 /// Whether no modifier such as Ctrl or Shift is held. Caps Lock and Num Lock don't count.
@@ -614,7 +632,7 @@ pub fn note_card(note: &Note, meta: Option<&str>, menu: &gio::Menu) -> gtk::Box 
         .build();
     menu_button.set_cursor_from_name(Some("pointer"));
     pointer::set_on_menu_items(menu_button.popover());
-    pointer::mark_destructive_menu_items(menu_button.popover(), &["Delete"]);
+    pointer::mark_destructive_menu_items(menu_button.popover(), &["Delete", "Delete Permanently"]);
 
     let card = gtk::Box::builder()
         .spacing(8)

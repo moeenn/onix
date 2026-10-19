@@ -9,7 +9,9 @@ use gtk::glib::{self, clone};
 
 use super::dialog::format_time;
 use super::note_view::NoteView;
-use super::notes::{card_grid, display_title, note_card};
+use super::notes::{
+    card_grid, delete_key_controller, display_title, focus_card_near, grid_cards, note_card,
+};
 use super::pointer;
 use crate::db::Store;
 use crate::model::Note;
@@ -100,6 +102,22 @@ impl DeletedNotesPage {
                 }
             }
         ));
+        this.grid.add_controller(delete_key_controller(clone!(
+            #[weak]
+            this,
+            move |index| {
+                let Some(id) = this.notes.borrow().get(index).map(|n| n.id) else {
+                    return;
+                };
+                // Keeps the focus on the grid once the card is gone.
+                let weak = Rc::downgrade(&this);
+                this.confirm_purge(id, move || {
+                    if let Some(this) = weak.upgrade() {
+                        focus_card_near(&grid_cards(&this.grid), index);
+                    }
+                });
+            }
+        )));
         this.install_actions();
         this
     }

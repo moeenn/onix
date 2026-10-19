@@ -8,7 +8,7 @@ use gtk::gio;
 use gtk::glib::{self, clone};
 
 use super::deleted_projects::{self, DeletedProjectsPage};
-use super::notes::{delete_key_controller, focus_card_near};
+use super::notes::{delete_key_controller, focus_card_near, grid_cards};
 use super::{board, pointer, project_dialog};
 use crate::db::Store;
 use crate::model::Project;
@@ -178,7 +178,7 @@ impl ProjectsPage {
                     let weak = Rc::downgrade(&this);
                     this.confirm_delete(&project, move || {
                         if let Some(this) = weak.upgrade() {
-                            focus_card_near(&this.cards(), index);
+                            focus_card_near(&grid_cards(&this.grid), index);
                         }
                     });
                 }
@@ -294,19 +294,6 @@ impl ProjectsPage {
         card.append(&menu_button);
         card.insert_action_group("project", Some(&actions));
         card.upcast()
-    }
-
-    /// The grid's cards, in the order of `projects`.
-    fn cards(&self) -> Vec<gtk::FlowBoxChild> {
-        let mut cards = Vec::new();
-        let mut child = self.grid.first_child();
-        while let Some(current) = child {
-            child = current.next_sibling();
-            if let Ok(card) = current.downcast::<gtk::FlowBoxChild>() {
-                cards.push(card);
-            }
-        }
-        cards
     }
 
     /// Asks before deleting `project`, and calls `on_deleted` once it is.
