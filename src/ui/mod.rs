@@ -81,8 +81,8 @@ impl Shell {
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("Onix")
-            .default_width(1200)
-            .default_height(800)
+            .default_width(1500)
+            .default_height(900)
             .width_request(600)
             .height_request(400)
             .build();
