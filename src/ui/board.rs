@@ -44,23 +44,29 @@ impl Column {
         let count = gtk::Label::builder()
             .css_classes(["dim-label", "numeric", "caption"])
             .build();
+        // Sits at the far end of the header, opposite the title. A text "+" rather than an
+        // icon, so the button shows regardless of icon theme.
+        let add_button = gtk::Button::builder()
+            .label("+")
+            .tooltip_text(format!("Add a ticket to {}", status.label()))
+            .css_classes(["flat", "circular", "add-ticket"])
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::Center)
+            .hexpand(true)
+            .build();
+        add_button.set_cursor_from_name(Some("pointer"));
+        add_button.update_property(&[gtk::accessible::Property::Label(&format!(
+            "Add a ticket to {}",
+            status.label()
+        ))]);
+
         let header = gtk::Box::builder()
             .spacing(8)
             .css_classes(["column-header"])
             .build();
         header.append(&title);
         header.append(&count);
-
-        // A text label rather than an icon, so the button shows regardless of icon theme.
-        let add_button = gtk::Button::builder()
-            .label("+  Add ticket")
-            .tooltip_text(format!("Add a ticket to {}", status.label()))
-            .css_classes(["add-ticket"])
-            .margin_start(COLUMN_PADDING)
-            .margin_end(COLUMN_PADDING)
-            .margin_bottom(4)
-            .build();
-        add_button.set_cursor_from_name(Some("pointer"));
+        header.append(&add_button);
 
         let cards_box = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -83,7 +89,6 @@ impl Column {
             .css_classes(["board-column"])
             .build();
         root.append(&header);
-        root.append(&add_button);
         root.append(&scroller);
 
         Self {

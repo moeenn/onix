@@ -12,3 +12,10 @@ $ cargo build --release
 // run app.
 $ ./target/release/onix
 ```
+
+## Install
+
+```bash
+// build and install for the current user (binary, launcher and icon).
+$ ./install.sh
+```

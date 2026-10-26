@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Onix
+Comment=Kanban boards and notes for your projects
+Exec=onix
+Icon=dev.onix.Onix
+Terminal=false
+Categories=Office;ProjectManagement;GTK;
+Keywords=kanban;tickets;notes;projects;board;
+StartupNotify=true
+StartupWMClass=dev.onix.Onix

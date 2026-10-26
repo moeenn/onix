@@ -9,6 +9,10 @@ use adw::prelude::*;
 use clap::Parser;
 use gtk::{gio, glib};
 
+/// Also the name of the installed desktop file and icon, so desktops can match them to the
+/// app's windows.
+const APP_ID: &str = "dev.onix.Onix";
+
 /// Kanban boards for projects and their tickets, stored in `~/.config/onix/data.db`.
 #[derive(Parser)]
 #[command(version, about)]
@@ -27,12 +31,14 @@ fn main() -> glib::ExitCode {
     };
 
     let app = adw::Application::builder()
-        .application_id("dev.onix.Onix")
+        .application_id(APP_ID)
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
     let opened = RefCell::new(Some(store));
     app.connect_activate(move |app| {
+        // Matches the installed icon, for window managers that don't look it up by app ID.
+        gtk::Window::set_default_icon_name(APP_ID);
         if let Some(store) = opened.take() {
             ui::build(app, store);
         }

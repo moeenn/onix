@@ -16,7 +16,7 @@ use crate::markdown;
 use crate::model::Note;
 
 /// Width (px) of the search box shown over the note.
-const SEARCH_WIDTH: i32 = 280;
+pub const SEARCH_WIDTH: i32 = 280;
 
 /// What the buttons of a deleted note's view do.
 struct DeletedActions {
@@ -574,7 +574,7 @@ fn highlight(label: &gtk::Label, query: &str) -> usize {
 }
 
 /// Byte ranges in `text` of the non-overlapping, case-insensitive occurrences of `query`.
-fn find_matches(text: &str, query: &str) -> Vec<Range<usize>> {
+pub fn find_matches(text: &str, query: &str) -> Vec<Range<usize>> {
     let query: String = query.chars().flat_map(char::to_lowercase).collect();
     if query.is_empty() {
         return Vec::new();

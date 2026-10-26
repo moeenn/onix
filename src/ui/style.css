@@ -43,14 +43,11 @@ dialog.alert .response-area > button {
 }
 
 .add-ticket {
-  padding: 6px 12px;
-  border: 1px dashed alpha(currentColor, 0.25);
-  background: none;
-  font-weight: normal;
-}
-
-.add-ticket:hover {
-  background-color: alpha(currentColor, 0.07);
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  font-size: 22px;
+  font-weight: bold;
 }
 
 .ticket {
@@ -174,10 +171,6 @@ checkbutton.md-task check:checked {
 /* Same as `.ticket`, so note cards match the board's cards. */
 .note-card {
   padding: 14px 16px;
-}
-
-.note-snippet {
-  line-height: 1.25;
 }
 
 /* Floats over the note, so it gets a shadow to stand apart from the text below. */

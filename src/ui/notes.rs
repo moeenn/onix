@@ -282,7 +282,7 @@ impl NotesPage {
     pub fn save_open_editor(&self) {
         let editor = self.editor.borrow().clone();
         if let Some(editor) = editor {
-            editor.save();
+            editor.save_on_leave();
         }
     }
 
@@ -571,47 +571,26 @@ pub fn focus_card_near(cards: &[gtk::FlowBoxChild], index: usize) {
     }
 }
 
-/// A card with the note's title in bold (if it has one), the start of its detail, a `meta`
-/// caption (if given), and a menu of `menu`'s options.
+/// A card with the note's title in bold, a `meta` caption (if given), and a menu of `menu`'s
+/// options. Notes saved before titles were required show the start of their detail instead.
 pub fn note_card(note: &Note, meta: Option<&str>, menu: &gio::Menu) -> gtk::Box {
     let text = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
         .hexpand(true)
         .build();
-    // A tiny max width lets the labels wrap to the card instead of widening it.
-    if let Some(title) = &note.title {
-        let title = gtk::Label::builder()
-            .label(title)
-            .wrap(true)
-            .wrap_mode(gtk::pango::WrapMode::WordChar)
-            .max_width_chars(1)
-            .xalign(0.0)
-            .css_classes(["heading"])
-            .build();
-        text.append(&title);
-    }
-    let snippet = snippet(&note.detail);
-    let detail = if snippet.is_empty() {
-        gtk::Label::builder()
-            .label("No details.")
-            .xalign(0.0)
-            .css_classes(["dim-label"])
-            .build()
-    } else {
-        gtk::Label::builder()
-            .label(&snippet)
-            .wrap(true)
-            .wrap_mode(gtk::pango::WrapMode::WordChar)
-            .max_width_chars(1)
-            .xalign(0.0)
-            .build()
-    };
-    detail.set_vexpand(true);
-    detail.set_valign(gtk::Align::Start);
-    detail.set_yalign(0.0);
-    detail.add_css_class("note-snippet");
-    text.append(&detail);
+    // A tiny max width lets the label wrap to the card instead of widening it.
+    let title = gtk::Label::builder()
+        .label(display_title(note))
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .max_width_chars(1)
+        .xalign(0.0)
+        .vexpand(true)
+        .valign(gtk::Align::Start)
+        .css_classes(["heading"])
+        .build();
+    text.append(&title);
     if let Some(meta) = meta {
         let meta = gtk::Label::builder()
             .label(meta)
@@ -655,16 +634,6 @@ pub fn display_title(note: &Note) -> String {
     }
 }
 
-/// What a card shows of `detail`, as plain text: its first line, cut to `PREVIEW_CHARS`
-/// characters with an ellipsis if it is longer.
-fn snippet(detail: &str) -> String {
-    let line = detail.trim().lines().next().unwrap_or_default().trim_end();
-    match line.char_indices().nth(PREVIEW_CHARS) {
-        Some((end, _)) => format!("{}…", line[..end].trim_end()),
-        None => line.to_owned(),
-    }
-}
-
 /// The first `PREVIEW_CHARS` characters of `detail`, with runs of whitespace (including line
 /// breaks) shown as single spaces.
 fn preview(detail: &str) -> String {
@@ -677,7 +646,7 @@ fn preview(detail: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{NotesPage, PREVIEW_CHARS, preview, snippet};
+    use super::{NotesPage, PREVIEW_CHARS, preview};
     use crate::model::Note;
 
     #[test]
@@ -697,24 +666,6 @@ mod tests {
         assert!(shown.ends_with('…'));
         assert_eq!(
             preview(&"a".repeat(PREVIEW_CHARS)),
-            "a".repeat(PREVIEW_CHARS)
-        );
-    }
-
-    #[test]
-    fn snippet_shows_the_first_line_up_to_the_limit() {
-        assert_eq!(snippet("\n  # Title\n\n- **one**\n"), "# Title");
-        assert_eq!(snippet(""), "");
-        let long = format!("{}\nsecond", "é".repeat(PREVIEW_CHARS + 5));
-        let shown = snippet(&long);
-        assert_eq!(
-            shown.chars().count(),
-            PREVIEW_CHARS + 1,
-            "counts characters"
-        );
-        assert!(shown.starts_with('é') && shown.ends_with('…'));
-        assert_eq!(
-            snippet(&"a".repeat(PREVIEW_CHARS)),
             "a".repeat(PREVIEW_CHARS)
         );
     }
