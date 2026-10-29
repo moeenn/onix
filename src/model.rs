@@ -61,6 +61,10 @@ pub struct Ticket {
     /// Kept up to date in the database, though the UI no longer shows it.
     #[allow(dead_code)]
     pub updated_at: DateTime<Utc>,
+    /// When the ticket was moved to Completed; `None` while it is in any other column.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Set a while after completion, when the ticket leaves the board for the archive.
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug)]

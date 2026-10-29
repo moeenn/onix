@@ -147,7 +147,11 @@ impl DeletedTicketsPage {
         match board.restore_ticket(id) {
             Ok(ticket) => {
                 self.remove_row(id);
-                board.toast(&format!("Restored to {}", ticket.status.label()));
+                if ticket.archived_at.is_some() {
+                    board.toast("Restored to Archived Tickets");
+                } else {
+                    board.toast(&format!("Restored to {}", ticket.status.label()));
+                }
             }
             Err(e) => {
                 board.toast(&format!("Could not restore: {e}"));

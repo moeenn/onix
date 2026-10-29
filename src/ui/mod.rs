@@ -1,3 +1,4 @@
+mod archived_tickets;
 mod board;
 mod code_spans;
 mod deleted_notes;

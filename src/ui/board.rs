@@ -7,10 +7,13 @@ use adw::prelude::*;
 use gtk::glib::{self, clone};
 use gtk::{gdk, gio, graphene};
 
+use super::archived_tickets::ArchivedTicketsPage;
 use super::deleted_tickets::DeletedTicketsPage;
 use super::dialog::{self, Target};
 use super::notes::is_plain;
 use super::{pointer, projects};
+use chrono::Utc;
+
 use crate::db::Store;
 use crate::model::{Project, Status, Ticket};
 
@@ -121,9 +124,11 @@ pub struct Board {
     window: adw::ApplicationWindow,
     toasts: adw::ToastOverlay,
     page: adw::NavigationPage,
-    /// The view this board's page is in, for pushing the deleted tickets page on top of it.
+    /// The view this board's page is in, for pushing the archived and deleted tickets pages
+    /// on top of it.
     navigation: adw::NavigationView,
-    /// Kept while pushed, so its handlers stay alive.
+    /// Kept while pushed, so their handlers stay alive.
+    archived_tickets: RefCell<Option<Rc<ArchivedTicketsPage>>>,
     deleted_tickets: RefCell<Option<Rc<DeletedTicketsPage>>>,
     search: gtk::SearchEntry,
     /// Scrolls the columns sideways.
@@ -165,6 +170,7 @@ impl Board {
         search_bar.append(&search);
 
         let menu = gio::Menu::new();
+        menu.append(Some("Archived Tickets"), Some("board.archived-tickets"));
         menu.append(Some("Deleted Tickets"), Some("board.deleted-tickets"));
         // A text label rather than an icon, so the button shows regardless of icon theme.
         let menu_button = gtk::MenuButton::builder()
@@ -217,6 +223,7 @@ impl Board {
             toasts: toasts.clone(),
             page,
             navigation: navigation.clone(),
+            archived_tickets: RefCell::default(),
             deleted_tickets: RefCell::default(),
             search: search.clone(),
             scroller: board_scroller,
@@ -298,6 +305,12 @@ impl Board {
         ));
         self.page.add_controller(keys);
 
+        let archived_tickets = gio::SimpleAction::new("archived-tickets", None);
+        archived_tickets.connect_activate(clone!(
+            #[weak]
+            board,
+            move |_, _| board.show_archived_tickets()
+        ));
         let deleted_tickets = gio::SimpleAction::new("deleted-tickets", None);
         deleted_tickets.connect_activate(clone!(
             #[weak]
@@ -305,6 +318,7 @@ impl Board {
             move |_, _| board.show_deleted_tickets()
         ));
         let actions = gio::SimpleActionGroup::new();
+        actions.add_action(&archived_tickets);
         actions.add_action(&deleted_tickets);
         self.page.insert_action_group("board", Some(&actions));
 
@@ -355,6 +369,12 @@ impl Board {
         &self.project
     }
 
+    fn show_archived_tickets(self: &Rc<Self>) {
+        let page = ArchivedTicketsPage::new(self);
+        self.navigation.push(page.page());
+        *self.archived_tickets.borrow_mut() = Some(page);
+    }
+
     fn show_deleted_tickets(self: &Rc<Self>) {
         let page = DeletedTicketsPage::new(self);
         self.navigation.push(page.page());
@@ -369,8 +389,12 @@ impl Board {
         pointer::add_toast(&self.toasts, message);
     }
 
-    /// Reloads every column from the database.
+    /// Reloads every column from the database, first archiving tickets completed long enough
+    /// ago.
     fn refresh(self: &Rc<Self>) {
+        if let Err(e) = self.store.borrow_mut().archive_completed(Utc::now()) {
+            self.toast(&format!("Could not archive completed tickets: {e}"));
+        }
         let tickets = match self.store.borrow().list(self.project.id) {
             Ok(tickets) => tickets,
             Err(e) => {
@@ -804,6 +828,27 @@ impl Board {
         Ok(ticket)
     }
 
+    /// Archives tickets that are due first, so the list is up to date.
+    pub fn list_archived_tickets(&self) -> Result<Vec<Ticket>, String> {
+        let mut store = self.store.borrow_mut();
+        store
+            .archive_completed(Utc::now())
+            .map_err(|e| e.to_string())?;
+        store
+            .list_archived_tickets(self.project.id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn unarchive_ticket(self: &Rc<Self>, id: i64) -> Result<Ticket, String> {
+        let result = self
+            .store
+            .borrow_mut()
+            .unarchive_ticket(id)
+            .map_err(|e| e.to_string());
+        self.refresh();
+        result
+    }
+
     pub fn list_deleted_tickets(&self) -> Result<Vec<Ticket>, String> {
         self.store
             .borrow()
@@ -877,6 +922,8 @@ mod tests {
             status: Status::Backlog,
             created_at: now,
             updated_at: now,
+            completed_at: None,
+            archived_at: None,
         };
         assert!(Board::matches(&ticket, "ci pipe"));
         assert!(Board::matches(&ticket, "clippy"));

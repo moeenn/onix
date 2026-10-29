@@ -571,13 +571,15 @@ pub fn focus_card_near(cards: &[gtk::FlowBoxChild], index: usize) {
     }
 }
 
-/// A card with the note's title in bold, a `meta` caption (if given), and a menu of `menu`'s
-/// options. Notes saved before titles were required show the start of their detail instead.
+/// A card with the note's title, sized like the project cards' names, a `meta` caption (if
+/// given), and a menu of `menu`'s options. Notes saved before titles were required show the
+/// start of their detail instead.
 pub fn note_card(note: &Note, meta: Option<&str>, menu: &gio::Menu) -> gtk::Box {
     let text = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
         .hexpand(true)
+        .valign(gtk::Align::Center)
         .build();
     // A tiny max width lets the label wrap to the card instead of widening it.
     let title = gtk::Label::builder()
@@ -586,9 +588,7 @@ pub fn note_card(note: &Note, meta: Option<&str>, menu: &gio::Menu) -> gtk::Box 
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .max_width_chars(1)
         .xalign(0.0)
-        .vexpand(true)
-        .valign(gtk::Align::Start)
-        .css_classes(["heading"])
+        .css_classes(["title-4"])
         .build();
     text.append(&title);
     if let Some(meta) = meta {
@@ -606,7 +606,7 @@ pub fn note_card(note: &Note, meta: Option<&str>, menu: &gio::Menu) -> gtk::Box 
         .child(&gtk::Label::new(Some("⋯")))
         .menu_model(menu)
         .tooltip_text("Note options")
-        .valign(gtk::Align::Start)
+        .valign(gtk::Align::Center)
         .css_classes(["flat"])
         .build();
     menu_button.set_cursor_from_name(Some("pointer"));

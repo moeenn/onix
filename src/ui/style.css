@@ -168,9 +168,10 @@ checkbutton.md-task check:checked {
   border-radius: 6px;
 }
 
-/* Same as `.ticket`, so note cards match the board's cards. */
+/* Same as `.project-card`, so the menu button sets the height and the title isn't left
+   with space below it. */
 .note-card {
-  padding: 14px 16px;
+  padding: 6px 6px 6px 16px;
 }
 
 /* Floats over the note, so it gets a shadow to stand apart from the text below. */

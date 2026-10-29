@@ -2,7 +2,7 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, ffi, params};
 
@@ -11,8 +11,9 @@ use crate::model::{Note, Project, Status, Ticket};
 /// Stored in the SQLite header so onix databases can be told apart from others ("ONIX").
 const APPLICATION_ID: i32 = 0x4F52_4758;
 /// 1 and 2 were single-board `project.db` files; 3 is `data.db` with multiple projects;
-/// 4 makes the names of projects that aren't deleted unique; 5 adds notes.
-const SCHEMA_VERSION: i32 = 5;
+/// 4 makes the names of projects that aren't deleted unique; 5 adds notes; 6 adds ticket
+/// completion and archiving.
+const SCHEMA_VERSION: i32 = 6;
 /// The oldest version that can still be upgraded.
 const MIN_SCHEMA_VERSION: i32 = 3;
 
@@ -55,6 +56,19 @@ CREATE TABLE notes (
 );
 ";
 
+/// Added in version 6. Tickets already completed count as completed when they last changed.
+const TICKET_ARCHIVE_SCHEMA: &str = "
+ALTER TABLE tickets ADD COLUMN completed_at TEXT;
+ALTER TABLE tickets ADD COLUMN archived_at TEXT;
+UPDATE tickets SET completed_at = updated_at WHERE status = 'completed';
+";
+
+/// Completed tickets are archived once they have been completed this long.
+const ARCHIVE_AFTER: TimeDelta = TimeDelta::days(7);
+
+/// Tickets shown on the board: neither deleted nor archived.
+const LIVE_TICKET: &str = "deleted_at IS NULL AND archived_at IS NULL";
+
 /// (name, declared type, not null, primary key)
 type Column = (&'static str, &'static str, bool, bool);
 
@@ -74,6 +88,8 @@ const TICKET_COLUMNS: &[Column] = &[
     ("created_at", "TEXT", true, false),
     ("updated_at", "TEXT", true, false),
     ("deleted_at", "TEXT", false, false),
+    ("completed_at", "TEXT", false, false),
+    ("archived_at", "TEXT", false, false),
 ];
 
 const NOTE_COLUMNS: &[Column] = &[
@@ -148,8 +164,8 @@ pub fn default_path() -> PathBuf {
     gtk::glib::user_config_dir().join("onix").join("data.db")
 }
 
-const TICKET_SELECT: &str =
-    "SELECT id, title, details, status, created_at, updated_at FROM tickets";
+const TICKET_SELECT: &str = "SELECT id, title, details, status, created_at, updated_at,
+     completed_at, archived_at FROM tickets";
 
 const NOTE_SELECT: &str = "SELECT id, title, detail, updated_at FROM notes";
 
@@ -195,6 +211,7 @@ impl Store {
              {SCHEMA}
              {PROJECT_NAME_INDEX_SQL}
              {NOTES_SCHEMA}
+             {TICKET_ARCHIVE_SCHEMA}
              PRAGMA application_id = {APPLICATION_ID};
              PRAGMA user_version = {SCHEMA_VERSION};
              COMMIT;"
@@ -207,6 +224,8 @@ impl Store {
         let unreadable = |e: Error| Error::Invalid(format!("contains unreadable data ({e})"));
         for project in self.list_projects().map_err(unreadable)? {
             self.list(project.id).map_err(unreadable)?;
+            self.list_archived_tickets(project.id).map_err(unreadable)?;
+            self.list_deleted_tickets(project.id).map_err(unreadable)?;
         }
         self.list_notes().map_err(unreadable)?;
         self.list_deleted_notes().map_err(unreadable)?;
@@ -339,10 +358,10 @@ impl Store {
         Ok(())
     }
 
-    /// Tickets of a project that aren't deleted, ordered by their position within each column.
+    /// Tickets of a project that are neither deleted nor archived, ordered by their position within each column.
     pub fn list(&self, project_id: i64) -> Result<Vec<Ticket>> {
         let mut stmt = self.conn.prepare_cached(&format!(
-            "{TICKET_SELECT} WHERE project_id = ?1 AND deleted_at IS NULL ORDER BY position, id"
+            "{TICKET_SELECT} WHERE project_id = ?1 AND {LIVE_TICKET} ORDER BY position, id"
         ))?;
         let tickets = stmt
             .query_map([project_id], ticket_from_row)?
@@ -353,7 +372,7 @@ impl Store {
     pub fn get(&self, id: i64) -> Result<Ticket> {
         self.conn
             .query_row(
-                &format!("{TICKET_SELECT} WHERE id = ?1 AND deleted_at IS NULL"),
+                &format!("{TICKET_SELECT} WHERE id = ?1 AND {LIVE_TICKET}"),
                 [id],
                 ticket_from_row,
             )
@@ -382,15 +401,13 @@ impl Store {
         if !project_exists {
             return Err(Error::ProjectNotFound(project_id));
         }
+        shift_down(&tx, project_id, status)?;
+        let completed_at = (status == Status::Completed).then_some(now);
         tx.execute(
-            "UPDATE tickets SET position = position + 1
-             WHERE project_id = ?1 AND status = ?2 AND deleted_at IS NULL",
-            params![project_id, status],
-        )?;
-        tx.execute(
-            "INSERT INTO tickets (project_id, title, details, status, position, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)",
-            params![project_id, title, details, status, now],
+            "INSERT INTO tickets
+                 (project_id, title, details, status, position, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5, ?6)",
+            params![project_id, title, details, status, now, completed_at],
         )?;
         let id = tx.last_insert_rowid();
         tx.commit()?;
@@ -399,8 +416,10 @@ impl Store {
 
     pub fn update_ticket(&mut self, id: i64, title: &str, details: &str) -> Result<Ticket> {
         let changed = self.conn.execute(
-            "UPDATE tickets SET title = ?2, details = ?3, updated_at = ?4
-             WHERE id = ?1 AND deleted_at IS NULL",
+            &format!(
+                "UPDATE tickets SET title = ?2, details = ?3, updated_at = ?4
+                 WHERE id = ?1 AND {LIVE_TICKET}"
+            ),
             params![id, title, details, Utc::now()],
         )?;
         if changed == 0 {
@@ -410,7 +429,7 @@ impl Store {
     }
 
     /// Soft-deletes a ticket: it stays in the table with `deleted_at` set, and is hidden
-    /// from every other query.
+    /// from every other query. Archived tickets can be deleted too, and stay archived.
     pub fn delete_ticket(&mut self, id: i64) -> Result<()> {
         let changed = self.conn.execute(
             "UPDATE tickets SET deleted_at = ?2 WHERE id = ?1 AND deleted_at IS NULL",
@@ -433,7 +452,8 @@ impl Store {
         Ok(tickets)
     }
 
-    /// Undeletes a ticket, putting it back at the top of the column it was deleted from.
+    /// Undeletes a ticket, putting it back at the top of the column it was deleted from, or
+    /// back among the archived tickets if it was archived.
     pub fn restore_ticket(&mut self, id: i64) -> Result<Ticket> {
         let tx = self.conn.transaction()?;
         let (project_id, status): (i64, Status) = tx
@@ -444,14 +464,61 @@ impl Store {
             )
             .optional()?
             .ok_or(Error::NotFound(id))?;
-        tx.execute(
-            "UPDATE tickets SET position = position + 1
-             WHERE project_id = ?1 AND status = ?2 AND deleted_at IS NULL",
-            params![project_id, status],
-        )?;
+        shift_down(&tx, project_id, status)?;
         tx.execute(
             "UPDATE tickets SET deleted_at = NULL, position = 0 WHERE id = ?1",
             [id],
+        )?;
+        let ticket = tx.query_row(
+            &format!("{TICKET_SELECT} WHERE id = ?1"),
+            [id],
+            ticket_from_row,
+        )?;
+        tx.commit()?;
+        Ok(ticket)
+    }
+
+    /// Archives the tickets completed at least `ARCHIVE_AFTER` before `now`. Returns how many.
+    pub fn archive_completed(&mut self, now: DateTime<Utc>) -> Result<usize> {
+        let archived = self.conn.execute(
+            &format!(
+                "UPDATE tickets SET archived_at = ?1
+                 WHERE status = 'completed' AND completed_at <= ?2 AND {LIVE_TICKET}"
+            ),
+            params![now, now - ARCHIVE_AFTER],
+        )?;
+        Ok(archived)
+    }
+
+    /// Archived tickets of a project that aren't deleted, most recently completed first.
+    pub fn list_archived_tickets(&self, project_id: i64) -> Result<Vec<Ticket>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "{TICKET_SELECT} WHERE project_id = ?1 AND archived_at IS NOT NULL
+             AND deleted_at IS NULL ORDER BY completed_at DESC, id DESC"
+        ))?;
+        let tickets = stmt
+            .query_map([project_id], ticket_from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(tickets)
+    }
+
+    /// Puts an archived ticket back at the top of the Completed column. Its completion date
+    /// becomes now, so it stays there for another `ARCHIVE_AFTER`.
+    pub fn unarchive_ticket(&mut self, id: i64) -> Result<Ticket> {
+        let tx = self.conn.transaction()?;
+        let (project_id, status): (i64, Status) = tx
+            .query_row(
+                "SELECT project_id, status FROM tickets
+                 WHERE id = ?1 AND archived_at IS NOT NULL AND deleted_at IS NULL",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .ok_or(Error::NotFound(id))?;
+        shift_down(&tx, project_id, status)?;
+        tx.execute(
+            "UPDATE tickets SET archived_at = NULL, completed_at = ?2, position = 0 WHERE id = ?1",
+            params![id, Utc::now()],
         )?;
         tx.commit()?;
         self.get(id)
@@ -476,7 +543,7 @@ impl Store {
         let tx = self.conn.transaction()?;
         let (project_id, current): (i64, Status) = tx
             .query_row(
-                "SELECT project_id, status FROM tickets WHERE id = ?1 AND deleted_at IS NULL",
+                &format!("SELECT project_id, status FROM tickets WHERE id = ?1 AND {LIVE_TICKET}"),
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -484,20 +551,23 @@ impl Store {
             .ok_or(Error::NotFound(id))?;
 
         let mut order: Vec<i64> = {
-            let mut stmt = tx.prepare(
+            let mut stmt = tx.prepare(&format!(
                 "SELECT id FROM tickets
-                 WHERE project_id = ?1 AND status = ?2 AND id <> ?3 AND deleted_at IS NULL
-                 ORDER BY position, id",
-            )?;
+                 WHERE project_id = ?1 AND status = ?2 AND id <> ?3 AND {LIVE_TICKET}
+                 ORDER BY position, id"
+            ))?;
             stmt.query_map(params![project_id, status, id], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?
         };
         order.insert(index.min(order.len()), id);
 
+        // Completing a ticket records when; moving it out of Completed forgets it again.
         if current != status {
+            let now = Utc::now();
+            let completed_at = (status == Status::Completed).then_some(now);
             tx.execute(
-                "UPDATE tickets SET status = ?2, updated_at = ?3 WHERE id = ?1",
-                params![id, status, Utc::now()],
+                "UPDATE tickets SET status = ?2, updated_at = ?3, completed_at = ?4 WHERE id = ?1",
+                params![id, status, now, completed_at],
             )?;
         }
         {
@@ -601,6 +671,18 @@ impl Store {
     }
 }
 
+/// Makes room at the top of the `status` column of `project_id`'s board.
+fn shift_down(conn: &Connection, project_id: i64, status: Status) -> Result<()> {
+    conn.execute(
+        &format!(
+            "UPDATE tickets SET position = position + 1
+             WHERE project_id = ?1 AND status = ?2 AND {LIVE_TICKET}"
+        ),
+        params![project_id, status],
+    )?;
+    Ok(())
+}
+
 /// Turns a unique-index violation on the project name into `DuplicateProjectName`.
 fn duplicate_name(e: rusqlite::Error, name: &str) -> Error {
     match &e {
@@ -621,6 +703,8 @@ fn ticket_from_row(row: &Row<'_>) -> rusqlite::Result<Ticket> {
         status: row.get(3)?,
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
+        completed_at: row.get(6)?,
+        archived_at: row.get(7)?,
     })
 }
 
@@ -658,7 +742,13 @@ fn validate(conn: &Connection) -> Result<()> {
     }
 
     validate_table(conn, "projects", PROJECT_COLUMNS)?;
-    validate_table(conn, "tickets", TICKET_COLUMNS)?;
+    // Files from before version 6 don't have the archiving columns yet; they get them below.
+    let ticket_columns = if version >= 6 {
+        TICKET_COLUMNS
+    } else {
+        &TICKET_COLUMNS[..TICKET_COLUMNS.len() - 2]
+    };
+    validate_table(conn, "tickets", ticket_columns)?;
 
     let references_projects: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM pragma_foreign_key_list('tickets')
@@ -702,7 +792,7 @@ fn validate(conn: &Connection) -> Result<()> {
         conn.execute_batch(&format!(
             "BEGIN;
              {NOTES_SCHEMA}
-             PRAGMA user_version = {SCHEMA_VERSION};
+             PRAGMA user_version = 5;
              COMMIT;"
         ))
         .map_err(|e| {
@@ -711,6 +801,20 @@ fn validate(conn: &Connection) -> Result<()> {
         })?;
     }
     validate_table(conn, "notes", NOTE_COLUMNS)?;
+
+    if version <= 5 {
+        conn.execute_batch(&format!(
+            "BEGIN;
+             {TICKET_ARCHIVE_SCHEMA}
+             PRAGMA user_version = {SCHEMA_VERSION};
+             COMMIT;"
+        ))
+        .map_err(|e| {
+            let _ = conn.execute_batch("ROLLBACK");
+            Error::Invalid(format!("could not add ticket archiving ({e})"))
+        })?;
+    }
+    validate_table(conn, "tickets", TICKET_COLUMNS)?;
     Ok(())
 }
 
@@ -1192,6 +1296,125 @@ mod tests {
         assert_eq!(store.list_notes().unwrap().len(), 1);
         let version: i32 = store
             .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn records_and_clears_completion_dates() {
+        let path = temp_path("completion");
+        let mut store = Store::open(&path).unwrap();
+        let p = store.create_project("Work").unwrap().id;
+        let a = store.create_ticket(p, Status::Review, "a", "").unwrap();
+        assert_eq!(a.completed_at, None);
+        let done = store
+            .create_ticket(p, Status::Completed, "done", "")
+            .unwrap();
+        assert!(done.completed_at.is_some(), "created as completed");
+
+        store.move_ticket(a.id, Status::Completed, 0).unwrap();
+        let completed_at = store.get(a.id).unwrap().completed_at;
+        assert!(completed_at.is_some());
+        // Reordering within Completed keeps the date.
+        store.move_ticket(a.id, Status::Completed, 1).unwrap();
+        assert_eq!(store.get(a.id).unwrap().completed_at, completed_at);
+        store.move_ticket(a.id, Status::Ready, 0).unwrap();
+        assert_eq!(store.get(a.id).unwrap().completed_at, None);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn archives_tickets_a_week_after_completion() {
+        let path = temp_path("archive");
+        let mut store = Store::open(&path).unwrap();
+        let p = store.create_project("Work").unwrap().id;
+        let old = store
+            .create_ticket(p, Status::Completed, "old", "")
+            .unwrap();
+        let recent = store
+            .create_ticket(p, Status::Completed, "recent", "")
+            .unwrap();
+        let open = store.create_ticket(p, Status::Ready, "open", "").unwrap();
+        let completed_at = old.completed_at.unwrap();
+
+        let soon = completed_at + ARCHIVE_AFTER - TimeDelta::seconds(1);
+        assert_eq!(store.archive_completed(soon).unwrap(), 0);
+        store
+            .conn
+            .execute(
+                "UPDATE tickets SET completed_at = ?2 WHERE id = ?1",
+                params![old.id, completed_at - TimeDelta::days(1)],
+            )
+            .unwrap();
+        assert_eq!(store.archive_completed(soon).unwrap(), 1);
+
+        let ids: Vec<i64> = store.list(p).unwrap().iter().map(|t| t.id).collect();
+        assert_eq!(
+            ids,
+            vec![recent.id, open.id],
+            "archived tickets leave the board"
+        );
+        assert!(matches!(store.get(old.id), Err(Error::NotFound(_))));
+        assert!(matches!(
+            store.move_ticket(old.id, Status::Ready, 0),
+            Err(Error::NotFound(_))
+        ));
+        let archived = store.list_archived_tickets(p).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, old.id);
+        assert!(archived[0].archived_at.is_some());
+
+        // Deleted while archived, it goes back to the archive when restored.
+        store.delete_ticket(old.id).unwrap();
+        assert!(store.list_archived_tickets(p).unwrap().is_empty());
+        assert!(store.restore_ticket(old.id).unwrap().archived_at.is_some());
+        assert_eq!(store.list_archived_tickets(p).unwrap().len(), 1);
+
+        // Unarchived, it is back on top of Completed, with a fresh completion date.
+        let restored = store.unarchive_ticket(old.id).unwrap();
+        assert_eq!(restored.status, Status::Completed);
+        assert!(restored.completed_at.unwrap() > completed_at);
+        assert_eq!(store.list(p).unwrap()[0].id, old.id);
+        assert!(store.list_archived_tickets(p).unwrap().is_empty());
+        assert!(matches!(
+            store.unarchive_ticket(old.id),
+            Err(Error::NotFound(_))
+        ));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn migrates_version_5_files() {
+        let path = temp_path("migrate-v5");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!(
+                "{SCHEMA}
+                 {PROJECT_NAME_INDEX_SQL}
+                 {NOTES_SCHEMA}
+                 INSERT INTO projects (name) VALUES ('Work');
+                 INSERT INTO tickets (project_id, title, status, position, created_at, updated_at)
+                 VALUES (1, 'done', 'completed', 0, '2026-01-01 00:00:00+00:00',
+                         '2026-01-02 00:00:00+00:00'),
+                        (1, 'open', 'ready', 0, '2026-01-01 00:00:00+00:00',
+                         '2026-01-02 00:00:00+00:00');
+                 PRAGMA application_id = {APPLICATION_ID};
+                 PRAGMA user_version = 5;"
+            ))
+            .unwrap();
+
+        let mut store = Store::open(&path).unwrap();
+        let tickets = store.list(1).unwrap();
+        let done = tickets.iter().find(|t| t.title == "done").unwrap();
+        let open = tickets.iter().find(|t| t.title == "open").unwrap();
+        assert_eq!(done.completed_at, Some(done.updated_at));
+        assert_eq!(open.completed_at, None);
+        assert_eq!(store.archive_completed(Utc::now()).unwrap(), 1);
+        drop(store);
+        let version: i32 = Connection::open(&path)
+            .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);

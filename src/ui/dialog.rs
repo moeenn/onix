@@ -361,8 +361,11 @@ impl TicketDialog {
             "caption-heading",
             ticket.status.as_str(),
         ]);
-        self.created_label
-            .set_label(&format!("Created {}", format_time(ticket.created_at)));
+        let mut dates = format!("Created {}", format_time(ticket.created_at));
+        if let Some(completed_at) = ticket.completed_at {
+            dates.push_str(&format!(" · Completed {}", format_time(completed_at)));
+        }
+        self.created_label.set_label(&dates);
         while let Some(child) = self.details.first_child() {
             self.details.remove(&child);
         }
