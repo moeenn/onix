@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::{Rc, Weak};
+use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::glib::{self, clone};
@@ -17,6 +18,10 @@ use crate::model::Note;
 
 /// Width (px) of the search box shown over the note.
 pub const SEARCH_WIDTH: i32 = 280;
+
+const COPY_ICON: &str = "edit-copy-symbolic";
+/// How long the copy button shows a check mark after copying.
+const COPIED_FEEDBACK: Duration = Duration::from_millis(1500);
 
 /// What the buttons of a deleted note's view do.
 struct DeletedActions {
@@ -37,6 +42,7 @@ pub struct NoteView {
     delete_button: gtk::Button,
     restore_button: gtk::Button,
     purge_button: gtk::Button,
+    copy_button: gtk::Button,
     title_label: gtk::Label,
     meta_label: gtk::Label,
     /// Holds the rendered markdown, rebuilt each time the note changes.
@@ -98,8 +104,17 @@ impl NoteView {
             .icon_name("go-previous-symbolic")
             .tooltip_text("Back (Escape)")
             .build();
+        let copy_button = gtk::Button::builder()
+            .icon_name(COPY_ICON)
+            .tooltip_text("Copy note to clipboard (Ctrl+C)")
+            .valign(gtk::Align::Start)
+            .halign(gtk::Align::End)
+            .hexpand(true)
+            .css_classes(["flat", "circular"])
+            .build();
         for button in [
             &back_button,
+            &copy_button,
             &edit_button,
             &delete_button,
             &restore_button,
@@ -123,8 +138,13 @@ impl NoteView {
             .wrap_mode(gtk::pango::WrapMode::WordChar)
             .xalign(0.0)
             .selectable(true)
+            .hexpand(true)
             .css_classes(["title-2"])
             .build();
+        // The button stays on the right even when the note has no title to show.
+        let title_row = gtk::Box::builder().spacing(12).build();
+        title_row.append(&title_label);
+        title_row.append(&copy_button);
         let meta_label = gtk::Label::builder()
             .wrap(true)
             .xalign(0.0)
@@ -138,7 +158,7 @@ impl NoteView {
             .orientation(gtk::Orientation::Vertical)
             .spacing(12)
             .build();
-        content.append(&title_label);
+        content.append(&title_row);
         content.append(&meta_label);
         content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         content.append(&details);
@@ -204,6 +224,7 @@ impl NoteView {
             delete_button,
             restore_button,
             purge_button,
+            copy_button,
             title_label,
             meta_label,
             details,
@@ -252,6 +273,11 @@ impl NoteView {
                 }
             }
         ));
+        self.copy_button.connect_clicked(clone!(
+            #[weak]
+            this,
+            move |_| this.copy_to_clipboard()
+        ));
         // Picks up changes made in the editor pushed on top of this page.
         self.page.connect_showing(clone!(
             #[weak]
@@ -299,6 +325,21 @@ impl NoteView {
                 glib::Propagation::Proceed,
                 move |_, _| {
                     this.go_back();
+                    glib::Propagation::Stop
+                }
+            ))),
+        ));
+        // Bubble phase too, so Ctrl+C in the search entry or a label with a selection copies
+        // that text instead.
+        shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("<Control>c"),
+            Some(gtk::CallbackAction::new(clone!(
+                #[weak]
+                this,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, _| {
+                    this.copy_to_clipboard();
                     glib::Propagation::Stop
                 }
             ))),
@@ -407,6 +448,20 @@ impl NoteView {
             n => format!("{n} matches"),
         });
         self.match_count.set_visible(!query.is_empty());
+    }
+
+    /// Copies the note's details, as markdown, and briefly shows a check mark on the button.
+    fn copy_to_clipboard(&self) {
+        self.copy_button
+            .clipboard()
+            .set_text(&self.note.borrow().detail);
+        self.copy_button.set_icon_name("object-select-symbolic");
+        let button = self.copy_button.downgrade();
+        glib::timeout_add_local_once(COPIED_FEEDBACK, move || {
+            if let Some(button) = button.upgrade() {
+                button.set_icon_name(COPY_ICON);
+            }
+        });
     }
 
     pub fn page(&self) -> &adw::NavigationPage {
