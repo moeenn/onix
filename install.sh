@@ -6,8 +6,10 @@ cd "$(dirname "$0")"
 
 APP_ID="dev.onix.Onix"
 BIN_DIR="$HOME/.local/bin"
-APP_DIR="$HOME/.local/share/applications"
-ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
+# The desktop only looks in XDG_DATA_HOME for per-user launchers and icons.
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
+APP_DIR="$DATA_DIR/applications"
+ICON_DIR="$DATA_DIR/icons/hicolor/scalable/apps"
 
 cargo build --release
 
@@ -22,14 +24,19 @@ sed "s|^Exec=.*|Exec=$BIN_DIR/onix|" "data/$APP_ID.desktop" > "$APP_DIR/$APP_ID.
 chmod 755 "$APP_DIR/$APP_ID.desktop"
 # Left by earlier versions of this script.
 rm -f "$APP_DIR/Onix.desktop"
+# Also left by earlier versions, which ignored XDG_DATA_HOME.
+OLD_DATA_DIR="$HOME/.local/share"
+if [ ! "$DATA_DIR" -ef "$OLD_DATA_DIR" ]; then
+    rm -f "$OLD_DATA_DIR/applications/$APP_ID.desktop" "$OLD_DATA_DIR/icons/hicolor/scalable/apps/$APP_ID.svg"
+fi
 
 # Refresh the launcher menus and icons, for whichever desktop is in use. Not
 # update-desktop-database: it only indexes MIME types, and Onix doesn't open files.
-if [ -f "$HOME/.local/share/icons/hicolor/index.theme" ]; then
-    command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q "$HOME/.local/share/icons/hicolor" || true
+if [ -f "$DATA_DIR/icons/hicolor/index.theme" ]; then
+    command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q "$DATA_DIR/icons/hicolor" || true
 fi
 command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 >/dev/null 2>&1 || true
-touch "$HOME/.local/share/icons/hicolor"
+touch "$DATA_DIR/icons/hicolor"
 
 echo "Installed onix to $BIN_DIR/onix"
 echo "Installed launcher to $APP_DIR/$APP_ID.desktop"
